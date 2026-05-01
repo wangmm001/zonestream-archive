@@ -1,0 +1,9 @@
+.secrets/
+*.pyc
+__pycache__/
+.venv/
+venv/
+.DS_Store
+dist/
+*.tar.zst
+!data/**/*.jsonl.zst

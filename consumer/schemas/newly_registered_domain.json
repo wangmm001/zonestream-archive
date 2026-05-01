@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/zonestream/newly_registered_domain.json",
+  "title": "newly_registered_domain (permissive)",
+  "description": "Tighten this once payload distribution is empirically known.",
+  "type": "object",
+  "minProperties": 1,
+  "anyOf": [
+    {"required": ["domain"]},
+    {"required": ["fqdn"]},
+    {"required": ["name"]}
+  ],
+  "additionalProperties": true
+}

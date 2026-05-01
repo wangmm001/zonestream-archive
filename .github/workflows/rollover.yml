@@ -1,0 +1,114 @@
+name: rollover
+
+on:
+  schedule:
+    - cron: '10 0 * * *'        # daily 00:10 UTC
+  workflow_dispatch:
+    inputs:
+      day:
+        description: 'YYYY-MM-DD to pack (default: yesterday UTC)'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      ZS_TOPICS: 'newly_registered_domain newly_registered_fqdn zone_diff'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve day
+        id: day
+        run: |
+          if [ -n "${{ inputs.day }}" ]; then
+            echo "day=${{ inputs.day }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "day=$(date -u -d 'yesterday' +%F)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Pack day
+        id: pack
+        run: |
+          set -euo pipefail
+          DAY="${{ steps.day.outputs.day }}"
+          DAY_PATH="${DAY//-//}"
+          mkdir -p dist
+          : > dist/SHA256SUMS
+          packed=0
+          for T in $ZS_TOPICS; do
+            DIR="data/${T}/${DAY_PATH}"
+            if [ ! -d "$DIR" ]; then
+              echo "skip ${T}: ${DIR} not present"
+              continue
+            fi
+            OUT="dist/${T}-${DAY}.tar.zst"
+            tar --use-compress-program='zstd -T0 -19' \
+                -cf "$OUT" -C data "${T}/${DAY_PATH}"
+            ( cd dist && sha256sum "$(basename "$OUT")" ) >> dist/SHA256SUMS
+            packed=$((packed + 1))
+          done
+          echo "packed=$packed" >> "$GITHUB_OUTPUT"
+          ls -la dist/ || true
+
+      - name: Create release
+        if: steps.pack.outputs.packed != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DAY="${{ steps.day.outputs.day }}"
+          gh release create "snap-${DAY}" \
+            --title  "Zonestream snapshot ${DAY}" \
+            --notes-file dist/SHA256SUMS \
+            dist/*.tar.zst dist/SHA256SUMS
+
+      - name: Prune from git
+        if: steps.pack.outputs.packed != '0'
+        run: |
+          set -e
+          DAY="${{ steps.day.outputs.day }}"
+          DAY_PATH="${DAY//-//}"
+          for T in $ZS_TOPICS; do
+            git rm -rf "data/${T}/${DAY_PATH}" 2>/dev/null || true
+          done
+          git config user.name  "zonestream-bot"
+          git config user.email "zonestream-bot@users.noreply.github.com"
+          if ! git diff --cached --quiet; then
+            git commit -m "rollover: ${DAY} → snap-${DAY}"
+            git push
+          fi
+
+      - name: Refresh INDEX.md
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          {
+            echo
+            gh release list --limit 200 --json tagName,name,publishedAt \
+              --jq 'sort_by(.publishedAt) | reverse | .[] | "- [\(.tagName)](https://github.com/${{ github.repository }}/releases/tag/\(.tagName)) — \(.publishedAt[:10])"'
+            echo
+          } > /tmp/index_block
+          python - <<'PY'
+          import pathlib, re
+          p = pathlib.Path("INDEX.md")
+          src = p.read_text()
+          block = pathlib.Path("/tmp/index_block").read_text()
+          out = re.sub(r"(?s)<!-- INDEX:BEGIN -->.*?<!-- INDEX:END -->",
+                       f"<!-- INDEX:BEGIN -->{block}<!-- INDEX:END -->", src)
+          p.write_text(out)
+          PY
+          git config user.name  "zonestream-bot"
+          git config user.email "zonestream-bot@users.noreply.github.com"
+          if ! git diff --quiet -- INDEX.md; then
+            git add INDEX.md
+            git commit -m "index: refresh"
+            git push
+          fi

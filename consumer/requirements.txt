@@ -1,0 +1,4 @@
+confluent-kafka==2.6.1
+zstandard==0.23.0
+websockets==13.1
+jsonschema==4.23.0

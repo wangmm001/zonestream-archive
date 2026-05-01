@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/zonestream/newly_registered_fqdn.json",
+  "title": "newly_registered_fqdn (permissive)",
+  "type": "object",
+  "minProperties": 1,
+  "anyOf": [
+    {"required": ["fqdn"]},
+    {"required": ["domain"]},
+    {"required": ["name"]}
+  ],
+  "additionalProperties": true
+}

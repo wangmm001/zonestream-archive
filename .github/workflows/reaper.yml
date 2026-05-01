@@ -1,0 +1,28 @@
+name: reaper
+
+on:
+  schedule:
+    - cron: '15 * * * *'        # every hour at :15
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  actions: write                # to dispatch consume.yml
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ZS_STALE_HOURS: '12'
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 200       # enough to find recent zonestream-bot commits
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python consumer/reaper.py
