@@ -9,6 +9,18 @@ fragments for a calendar day into the canonical flat artifact
 github.com/wangmm001/top-domains-aggregate) and uploads the same file as a
 GitHub Release asset, then ``git rm``s the per-day _partial directory.
 
+Broker offset durability
+------------------------
+This consumer **never advances broker-committed offsets**. It only writes
+data to disk and snapshots the read positions it reached into
+``state/offsets.json``. The workflow then commits the data to git, pushes
+it, and only on push success calls ``consumer/finalize_offsets.py`` which
+reads ``state/offsets.json`` and applies those offsets to the broker. If the
+push fails, the broker offsets stay where they were and the next run
+re-reads the same window — at-least-once with possible duplicates that
+``pack_day.py`` deduplicates at rollover time. Without this discipline a
+failed push silently loses data.
+
 Binary topics (Avro-on-the-wire) use length-prefixed framing — see
 KAFKA_FRAMING.md. We preserve wire bytes (Confluent magic + 4-byte schema id
 + Avro payload) plus the broker timestamp so records can be replayed through
@@ -138,18 +150,30 @@ class HourlyWriters:
 
 
 def snapshot_offsets(consumer: Consumer) -> None:
+    """Snapshot the *read positions* this run reached.
+
+    These are the offsets we WANT to commit to the broker, but only after
+    the workflow has successfully pushed our data to git. ``finalize_offsets.py``
+    reads this file and performs the actual broker commit.
+    """
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     snap: dict[str, dict[str, int]] = {}
     assignments = consumer.assignment()
     if not assignments:
         return
-    committed = consumer.committed(assignments, timeout=10)
-    for tp in committed:
-        snap.setdefault(tp.topic, {})[str(tp.partition)] = tp.offset
+    positions = consumer.position(assignments)
+    for tp in positions:
+        if tp.offset < 0:
+            continue
+        snap.setdefault(tp.topic, {})[str(tp.partition)] = int(tp.offset)
     snap["_meta"] = {
         "captured_at": int(time.time()),
         "group_id": os.environ["ZS_GROUP_ID"],
-        "note": "Best-effort snapshot. Broker offsets are authoritative.",
+        "run_id": os.environ.get("GITHUB_RUN_ID", "local"),
+        "note": (
+            "Read positions reached by this run. Apply with finalize_offsets.py "
+            "ONLY after data has been durably pushed to git."
+        ),
     }
     STATE_PATH.write_text(json.dumps(snap, sort_keys=True, indent=2))
 
@@ -192,7 +216,6 @@ def main() -> int:
             if msg is None:
                 if time.monotonic() - last_flush >= flush_seconds:
                     writers.flush_all()
-                    consumer.commit(asynchronous=False)
                     msgs_flushed = msgs_seen
                     last_flush = time.monotonic()
                 continue
@@ -211,13 +234,11 @@ def main() -> int:
 
             if time.monotonic() - last_flush >= flush_seconds:
                 writers.flush_all()
-                consumer.commit(asynchronous=False)
                 msgs_flushed = msgs_seen
                 last_flush = time.monotonic()
     finally:
         try:
             writers.flush_all()
-            consumer.commit(asynchronous=False)
             msgs_flushed = msgs_seen
             snapshot_offsets(consumer)
         finally:

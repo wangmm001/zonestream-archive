@@ -74,6 +74,7 @@ jobs:
           git status --short || true
 
       - name: Commit hourly partitions
+        id: push
         if: always()
         run: |
           set -e
@@ -82,12 +83,21 @@ jobs:
           git add -A data/ state/
           if git diff --cached --quiet; then
             echo "no changes to commit"
+            echo "pushed=skip" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git commit -m "data: $(date -u +%FT%H:%MZ) batch (run ${GITHUB_RUN_ID})"
           for i in 1 2 3 4 5; do
             git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && \
-              git push origin "HEAD:${GITHUB_REF_NAME}" && exit 0
+              git push origin "HEAD:${GITHUB_REF_NAME}" && \
+              { echo "pushed=ok" >> "$GITHUB_OUTPUT"; exit 0; }
             sleep $((i * 5))
           done
           exit 1
+
+      - name: Finalize broker offsets
+        # Only advance broker offsets after the data is durably in git.
+        # If this step is skipped (push failed, no-data run, …) the broker
+        # keeps the previous offsets and the next run safely re-reads.
+        if: steps.push.outputs.pushed == 'ok'
+        run: python consumer/finalize_offsets.py

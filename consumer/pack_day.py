@@ -36,6 +36,15 @@ DATA_ROOT = Path("data")
 
 
 def pack_json(topic: str, day: str) -> Path | None:
+    """Concatenate, dedupe by line, gzip, in stable insertion order.
+
+    Retries (e.g. when ``finalize_offsets.py`` failed and the next run
+    re-consumed the same Kafka window) can produce duplicate lines across
+    fragments. We dedupe by exact line bytes — broker payloads are
+    byte-stable for a given (topic, partition, offset), so identical lines
+    are guaranteed to be re-fetches and not distinct events with collisional
+    content.
+    """
     src = DATA_ROOT / topic / "_partial" / day
     if not src.is_dir():
         return None
@@ -45,25 +54,49 @@ def pack_json(topic: str, day: str) -> Path | None:
     out = DATA_ROOT / topic / f"{day}.jsonl.gz"
     out.parent.mkdir(parents=True, exist_ok=True)
     dctx = zstd.ZstdDecompressor()
+    seen: set[bytes] = set()
+    n_in = n_out = 0
     # Reproducible gzip: mtime=0, no filename.
     with open(out, "wb") as raw, gzip.GzipFile(
         fileobj=raw, mode="wb", filename="", mtime=0, compresslevel=9
     ) as gz:
         for frag in fragments:
             with open(frag, "rb") as f, dctx.stream_reader(f) as r:
-                # Copy chunked to keep memory bounded.
+                # Buffer-line-iterate so memory stays bounded.
+                pending = b""
                 while True:
-                    buf = r.read(1 << 20)
-                    if not buf:
+                    chunk = r.read(1 << 20)
+                    if not chunk:
                         break
-                    # Skip blank lines that may slip through partials.
-                    if b"\n\n" in buf:
-                        buf = b"\n".join(
-                            ln for ln in buf.split(b"\n") if ln.strip()
-                        )
-                        if buf:
-                            buf += b"\n"
-                    gz.write(buf)
+                    pending += chunk
+                    while True:
+                        nl = pending.find(b"\n")
+                        if nl < 0:
+                            break
+                        line = pending[:nl]
+                        pending = pending[nl + 1:]
+                        if not line:
+                            continue
+                        n_in += 1
+                        if line in seen:
+                            continue
+                        seen.add(line)
+                        gz.write(line)
+                        gz.write(b"\n")
+                        n_out += 1
+                if pending.strip():
+                    n_in += 1
+                    if pending not in seen:
+                        seen.add(pending)
+                        gz.write(pending)
+                        if not pending.endswith(b"\n"):
+                            gz.write(b"\n")
+                        n_out += 1
+    if n_in != n_out:
+        print(
+            f"# {topic}/{day}: dedup removed {n_in - n_out} of {n_in} lines",
+            file=sys.stderr,
+        )
     _update_current(topic, out)
     return out
 
