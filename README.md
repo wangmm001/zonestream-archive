@@ -25,11 +25,13 @@ reaper.yml  – watchdog, opens an issue if no commit in 12h
 
 ## Topics
 
-| topic                       | description                              | schema                         |
-|-----------------------------|------------------------------------------|--------------------------------|
-| `newly_registered_domain`   | newly observed registered domains        | `consumer/schemas/newly_registered_domain.json` |
-| `newly_registered_fqdn`     | newly observed FQDNs                     | `consumer/schemas/newly_registered_fqdn.json`   |
-| `zone_diff`                 | OpenINTEL fDNS-shaped zone change events | `consumer/schemas/zone_diff.json`               |
+| topic                       | default? | notes                                     |
+|-----------------------------|----------|-------------------------------------------|
+| `newly_registered_domain`   | **yes**  | ~5 % of total stream volume, signal-rich  |
+| `newly_registered_fqdn`     | no       | wildcard firehose, ~10× the volume; opt in via dispatch input or `vars.ZS_TOPICS` |
+| `zone_diff`                 | no       | requires auth (anon `kafka:9092` returns `TOPIC_AUTHORIZATION_FAILED`) |
+
+Schemas live under `consumer/schemas/` and are intentionally permissive.
 
 ## Setup
 

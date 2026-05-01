@@ -17,6 +17,10 @@ on:
         description: 'kafka or ws'
         required: false
         default: 'kafka'
+      topics:
+        description: 'Comma-separated topics. Default = newly_registered_domain only. Use newly_registered_domain,newly_registered_fqdn for FQDN firehose; zone_diff requires auth.'
+        required: false
+        default: 'newly_registered_domain'
 
 concurrency:
   group: zonestream-consume
@@ -30,7 +34,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350        # 5h50m, leaves room for commit/push
     env:
-      ZS_TOPICS: 'newly_registered_domain,newly_registered_fqdn,zone_diff'
+      # Default = the small, signal-rich topic. newly_registered_fqdn is a
+      # wildcard-heavy firehose (~10x volume) and zone_diff requires auth.
+      # Override per run via the topics input or globally via vars.ZS_TOPICS.
+      ZS_TOPICS: ${{ inputs.topics || vars.ZS_TOPICS || 'newly_registered_domain' }}
       # Group id is not a secret — it just labels your consumer offsets on the
       # broker. Override it in repo *Variables* (not Secrets) if you want.
       ZS_GROUP_ID: ${{ vars.ZS_GROUP_ID || format('gha-archive-{0}', github.repository_id) }}
@@ -68,13 +75,14 @@ jobs:
       - name: Commit hourly partitions
         if: always()
         run: |
+          set -e
           git config user.name  "zonestream-bot"
           git config user.email "zonestream-bot@users.noreply.github.com"
-          if git diff --quiet -- data/ state/ && git diff --quiet --cached -- data/ state/; then
+          git add -A data/ state/
+          if git diff --cached --quiet; then
             echo "no changes to commit"
             exit 0
           fi
-          git add data/ state/
           git commit -m "data: $(date -u +%FT%H:%MZ) batch (run ${GITHUB_RUN_ID})"
           for i in 1 2 3 4 5; do
             git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && \
