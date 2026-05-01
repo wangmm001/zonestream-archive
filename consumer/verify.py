@@ -1,19 +1,26 @@
 """Sample-verify a day's release assets.
 
-For each <topic>-YYYY-MM-DD.tar.zst asset attached to release snap-YYYY-MM-DD:
-1. Verify SHA-256 matches the SHA256SUMS body of the release.
-2. Decompress, sample SAMPLE_RATE of lines, validate against the per-topic
-   JSON Schema in consumer/schemas/.
-3. On any failure, exit non-zero so the workflow opens an issue.
+Each release `snap-YYYY-MM-DD` carries one flat artifact per topic
+(`<topic>-YYYY-MM-DD.jsonl.gz` for JSON topics, `<topic>-YYYY-MM-DD.kfb.zst`
+for binary ones — but binary topics are not in the default set) plus a
+`SHA256SUMS` file. We:
+
+1. Download all assets to `dist-verify/`.
+2. Verify each asset's SHA-256 matches `SHA256SUMS`.
+3. For JSON assets, sample-validate against the per-topic JSON Schema.
+4. For binary assets, sample-validate the Confluent framing magic byte.
+
+Exits non-zero if any check fails so the workflow can open an issue.
 
 Env:
-- ZS_DAY       : YYYY-MM-DD (default = yesterday UTC)
-- ZS_TOPICS    : comma-separated topic list
-- SAMPLE_RATE  : float in (0,1], default 0.01
+- ZS_DAY      : YYYY-MM-DD (default = yesterday UTC)
+- ZS_TOPICS   : comma-separated topic list
+- SAMPLE_RATE : float in (0,1], default 0.01
 """
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import io
 import json
@@ -22,7 +29,6 @@ import random
 import struct
 import subprocess
 import sys
-import tarfile
 import time
 from pathlib import Path
 
@@ -31,15 +37,11 @@ from jsonschema import Draft202012Validator
 
 SCHEMAS_DIR = Path("consumer/schemas")
 WORK_DIR = Path("dist-verify")
-_KFB_HDR = struct.Struct(">QI")  # u64 ts_ms, u32 payload_len
+_KFB_HDR = struct.Struct(">QI")
 
 
 def yesterday_utc() -> str:
     return time.strftime("%Y-%m-%d", time.gmtime(time.time() - 86400))
-
-
-def gh(*args: str) -> str:
-    return subprocess.check_output(["gh", *args], text=True)
 
 
 def fetch_release(tag: str) -> dict[str, Path]:
@@ -47,10 +49,7 @@ def fetch_release(tag: str) -> dict[str, Path]:
     subprocess.check_call(
         ["gh", "release", "download", tag, "--dir", str(WORK_DIR), "--clobber"]
     )
-    files: dict[str, Path] = {}
-    for p in WORK_DIR.iterdir():
-        files[p.name] = p
-    return files
+    return {p.name: p for p in WORK_DIR.iterdir()}
 
 
 def parse_sumfile(text: str) -> dict[str, str]:
@@ -74,47 +73,32 @@ def sha256_of(path: Path) -> str:
     return h.hexdigest()
 
 
-def _iter_tar_members(asset: Path, suffix: str):
-    """Yield (member_name, raw_inner_stream) for each tar member matching suffix."""
-    with open(asset, "rb") as f:
-        outer = zstd.ZstdDecompressor().stream_reader(f)
-        with tarfile.open(fileobj=outer, mode="r|") as tar:
-            for member in tar:
-                if not member.isfile() or not member.name.endswith(suffix):
-                    continue
-                inner = tar.extractfile(member)
-                if inner is None:
-                    continue
-                yield member.name, inner
-
-
-def iter_jsonl_zst(asset: Path):
-    """Decompress each .jsonl.zst tar member and yield (member, line)."""
-    for name, inner in _iter_tar_members(asset, ".jsonl.zst"):
-        with zstd.ZstdDecompressor().stream_reader(inner) as r:
-            buf = io.TextIOWrapper(r, encoding="utf-8")
-            for line in buf:
-                line = line.strip()
-                if not line:
-                    continue
-                yield name, line
+def iter_jsonl_gz(asset: Path):
+    """Yield (line_number, line) for each non-blank line."""
+    with gzip.open(asset, "rt", encoding="utf-8") as f:
+        for ln_no, line in enumerate(f, 1):
+            line = line.strip()
+            if line:
+                yield ln_no, line
 
 
 def iter_kfb_zst(asset: Path):
-    """Yield (member, ts_ms, payload) for each .kfb.zst tar member."""
-    for name, inner in _iter_tar_members(asset, ".kfb.zst"):
-        with zstd.ZstdDecompressor().stream_reader(inner) as r:
+    """Yield (frame_index, ts_ms, payload) for each .kfb.zst frame."""
+    idx = 0
+    with open(asset, "rb") as f:
+        with zstd.ZstdDecompressor().stream_reader(f) as r:
             while True:
                 head = r.read(_KFB_HDR.size)
                 if not head:
                     return
                 if len(head) < _KFB_HDR.size:
-                    raise ValueError(f"{name}: truncated header")
+                    raise ValueError("truncated frame header")
                 ts_ms, ln = _KFB_HDR.unpack(head)
                 payload = r.read(ln)
                 if len(payload) != ln:
-                    raise ValueError(f"{name}: truncated payload")
-                yield name, ts_ms, payload
+                    raise ValueError("truncated frame payload")
+                idx += 1
+                yield idx, ts_ms, payload
 
 
 def load_validator(topic: str) -> Draft202012Validator | None:
@@ -146,37 +130,32 @@ def main() -> int:
     rng = random.Random(0xC0FFEE ^ hash(day))
 
     for topic in topics:
-        asset_name = f"{topic}-{day}.tar.zst"
-        asset = files.get(asset_name)
-        if asset is None:
-            print(f"  - {asset_name}: missing")
+        # JSON asset name
+        json_name = f"{topic}-{day}.jsonl.gz"
+        kfb_name = f"{topic}-{day}.kfb.zst"
+        if json_name in files:
+            asset = files[json_name]
+            asset_name = json_name
+            mode = "json"
+        elif kfb_name in files:
+            asset = files[kfb_name]
+            asset_name = kfb_name
+            mode = "binary"
+        else:
+            print(f"  - {topic}: no asset for {day}")
             continue
+
         got = sha256_of(asset)
         want = expected.get(asset_name)
         if want is None or want != got:
             failures.append(f"{asset_name}: sha256 mismatch (want={want} got={got})")
             continue
 
-        validator = load_validator(topic)
-        is_binary = (validator is None) or (topic.endswith("_measurements"))
         n_total = n_sampled = n_bad = 0
         try:
-            if is_binary:
-                # .kfb.zst — verify framing integrity, schema id sanity, sample.
-                for member, ts_ms, payload in iter_kfb_zst(asset):
-                    n_total += 1
-                    if rng.random() > sample_rate:
-                        continue
-                    n_sampled += 1
-                    if len(payload) < 5 or payload[0] != 0x00:
-                        n_bad += 1
-                        if n_bad <= 5:
-                            failures.append(
-                                f"{asset_name}::{member}: bad Confluent framing "
-                                f"(first byte 0x{payload[:1].hex()})"
-                            )
-            else:
-                for member, line in iter_jsonl_zst(asset):
+            if mode == "json":
+                validator = load_validator(topic)
+                for ln_no, line in iter_jsonl_gz(asset):
                     n_total += 1
                     if rng.random() > sample_rate:
                         continue
@@ -186,21 +165,35 @@ def main() -> int:
                     except Exception as exc:
                         n_bad += 1
                         if n_bad <= 5:
-                            failures.append(
-                                f"{asset_name}::{member}: invalid JSON ({exc})"
-                            )
+                            failures.append(f"{asset_name}:{ln_no}: invalid JSON ({exc})")
+                        continue
+                    if validator is None:
                         continue
                     errs = list(validator.iter_errors(obj))
                     if errs:
                         n_bad += 1
                         if n_bad <= 5:
                             failures.append(
-                                f"{asset_name}::{member}: schema fail "
+                                f"{asset_name}:{ln_no}: schema fail "
                                 f"({errs[0].message})"
                             )
-        except ValueError as exc:
-            failures.append(f"{asset_name}: framing error: {exc}")
-        kind = "frames" if is_binary else "lines"
+            else:  # binary
+                for idx, ts_ms, payload in iter_kfb_zst(asset):
+                    n_total += 1
+                    if rng.random() > sample_rate:
+                        continue
+                    n_sampled += 1
+                    if len(payload) < 5 or payload[0] != 0x00:
+                        n_bad += 1
+                        if n_bad <= 5:
+                            failures.append(
+                                f"{asset_name} frame {idx}: bad Confluent magic "
+                                f"(first byte 0x{payload[:1].hex()})"
+                            )
+        except (ValueError, OSError) as exc:
+            failures.append(f"{asset_name}: read error: {exc}")
+
+        kind = "frames" if mode == "binary" else "lines"
         print(f"  + {asset_name}: {kind}={n_total} sampled={n_sampled} bad={n_bad}")
 
     if failures:

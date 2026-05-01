@@ -4,23 +4,44 @@ Long-term archive of [OpenINTEL Zonestream](https://openintel.nl/data/zonestream
 (real-time DNS zone updates, see *DarkDNS: Revisiting the Value of Rapid Zone
 Update*, IMC '24) running entirely on free GitHub resources.
 
-## How it works
+Data is organised the same way as the sibling
+[`wangmm001/top-domains-aggregate`](https://github.com/wangmm001/top-domains-aggregate):
+**one flat per-day file plus a `current` pointer**, except split per topic.
+
+## Layout
+
+```
+data/
+  <topic>/
+    YYYY-MM-DD.jsonl.gz       # finalized daily file (after rollover)
+    current.jsonl.gz          # byte copy of the most recent day
+    _partial/                 # transient hourly fragments for the current day,
+      YYYY-MM-DD/             # eaten by the next 00:10 UTC rollover
+        HH-r<runid>.jsonl.zst
+```
+
+`<topic>` is one of `newly_registered_domain`, `newly_registered_fqdn`,
+`confirmed_newly_registered_domain` (the three lean defaults). Each line is
+one JSON document straight from the Kafka broker — see
+[Topics](#topics) below for the per-topic schemas.
+
+## Pipeline
 
 ```
 Zonestream (Kafka :9092 anon / WebSocket /ws)
         │
         ▼
-GitHub Actions runner (consume.yml, ≤5h45m)
-        │  NDJSON, zstd-compressed, partitioned by hour
+consume.yml  cron every 6 h, runs ≤5h45m
+        │  appends NDJSON+zstd into data/<topic>/_partial/<day>/<HH>-r<run>.jsonl.zst
         ▼
-data/<topic>/YYYY/MM/DD/HH.jsonl.zst   (rolling ~30 days, in git)
-        │
-        ▼  rollover.yml (00:10 UTC)
-GitHub Releases  tag=snap-YYYY-MM-DD
-        │  asset=<topic>-YYYY-MM-DD.tar.zst + SHA256SUMS
+rollover.yml  cron 00:10 UTC daily
+        │  for each topic: cat _partial/<yesterday>/*.jsonl.zst → <yesterday>.jsonl.gz
+        │  copies → current.jsonl.gz
+        │  uploads <topic>-<yesterday>.jsonl.gz to release snap-<yesterday>
+        │  git rm _partial/<yesterday>/
         ▼
-verify.yml  – daily schema/sha256 sampling
-reaper.yml  – watchdog, opens an issue if no commit in 12h
+verify.yml  cron 01:30 UTC – sha256 + schema-sampling on the freshly-uploaded release
+reaper.yml  hourly watchdog, opens an issue if no commit lands for 12 h
 ```
 
 ## Topics
@@ -67,12 +88,18 @@ Zonestream's Kafka stream is anonymous (`kafka.zonestream.openintel.nl:9092`,
    `run_seconds=600`.
 4. Once a clean batch lands, the cron schedules take over.
 
-## Restoring data
+## Consume
 
 ```bash
-gh release download snap-2026-04-30 -p '*.tar.zst' -p 'SHA256SUMS'
+# Today's newly registered domains, latest snapshot
+curl -L https://raw.githubusercontent.com/wangmm001/zonestream-archive/main/data/newly_registered_domain/current.jsonl.gz \
+  | zcat | head
+
+# Yesterday's full DarkDNS-validated list
+gh release download snap-2026-04-30 -R wangmm001/zonestream-archive \
+  -p 'confirmed_newly_registered_domain-2026-04-30.jsonl.gz' -p 'SHA256SUMS'
 sha256sum -c SHA256SUMS
-tar --zstd -xf newly_registered_domain-2026-04-30.tar.zst
+zcat confirmed_newly_registered_domain-2026-04-30.jsonl.gz | wc -l
 ```
 
 ## Caveats

@@ -1,12 +1,18 @@
-"""Zonestream → hourly partitions, two on-disk formats.
+"""Zonestream → hourly partitions, finalized into per-day flat files at
+rollover time.
 
-JSON topics land in ``data/<topic>/YYYY/MM/DD/HH.jsonl.zst`` (one JSON document
-per line, raw broker payload, no reformatting).
+During a run, JSON topics are written to
+``data/<topic>/_partial/YYYY-MM-DD/HH-r<runid>.jsonl.zst`` and binary topics
+to ``…/HH-r<runid>.kfb.zst``. The daily ``rollover.yml`` workflow merges all
+fragments for a calendar day into the canonical flat artifact
+``data/<topic>/YYYY-MM-DD.jsonl.gz`` (matching the layout convention of
+github.com/wangmm001/top-domains-aggregate) and uploads the same file as a
+GitHub Release asset, then ``git rm``s the per-day _partial directory.
 
-Binary topics (Avro-on-the-wire) land in ``data/<topic>/YYYY/MM/DD/HH.kfb.zst``
-using a length-prefixed framing — see KAFKA_FRAMING.md. We preserve the wire
-bytes (Confluent magic + 4-byte schema id + Avro payload) plus the broker
-timestamp so the records can be decoded later when the schema becomes known.
+Binary topics (Avro-on-the-wire) use length-prefixed framing — see
+KAFKA_FRAMING.md. We preserve wire bytes (Confluent magic + 4-byte schema id
++ Avro payload) plus the broker timestamp so records can be replayed through
+any future schema-aware decoder.
 
 Env:
 - ZS_RUN_SECONDS   wall-clock budget (default 5h45m)
@@ -80,9 +86,16 @@ class HourlyWriters:
         self._open: dict[tuple[str, str], tuple[object, object, str]] = {}
 
     def _path(self, topic: str, hour: str) -> Path:
+        # `hour` is "YYYY/MM/DD/HH" from time.gmtime; convert to the new
+        # _partial/<YYYY-MM-DD>/<HH>-r<run>.<ext> layout.
+        parts = hour.split("/")
+        if len(parts) != 4:
+            raise ValueError(f"unexpected hour format: {hour!r}")
+        day = "-".join(parts[:3])
+        hh = parts[3]
         fmt = TOPIC_FORMAT.get(topic, "binary")
         suffix = "jsonl.zst" if fmt == "json" else "kfb.zst"
-        return DATA_ROOT / topic / f"{hour}-r{RUN_TAG}.{suffix}"
+        return DATA_ROOT / topic / "_partial" / day / f"{hh}-r{RUN_TAG}.{suffix}"
 
     def _open_writer(self, topic: str, hour: str):
         fmt = TOPIC_FORMAT.get(topic, "binary")

@@ -57,8 +57,10 @@ def write_record(topic: str, payload: bytes) -> None:
     obj["_zs_source"] = "ws"
     line = (json.dumps(obj, ensure_ascii=False) + "\n").encode()
 
-    hour = time.strftime("%Y/%m/%d/%H", time.gmtime())
-    path = DATA_ROOT / topic / f"{hour}-r{RUN_TAG}.jsonl.zst"
+    now = time.gmtime()
+    day = time.strftime("%Y-%m-%d", now)
+    hh = time.strftime("%H", now)
+    path = DATA_ROOT / topic / "_partial" / day / f"{hh}-r{RUN_TAG}.jsonl.zst"
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "ab") as raw:
         cctx = zstd.ZstdCompressor(level=10)
