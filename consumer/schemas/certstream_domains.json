@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/zonestream/certstream_domains.json",
+  "title": "certstream_domains (CT cert → domain list, permissive)",
+  "type": "object",
+  "required": ["fingerprint"],
+  "properties": {
+    "certIndex":            {"type": "integer"},
+    "domain_list":          {"type": "array", "items": {"type": "string"}},
+    "fingerprint":          {"type": "string"},
+    "seen":                 {"type": "number"},
+    "sld_list":             {"type": "array", "items": {"type": "string"}},
+    "source":               {"type": "string"},
+    "submission_timestamp": {"type": "number"},
+    "updateType":           {"type": "string"}
+  },
+  "additionalProperties": true
+}

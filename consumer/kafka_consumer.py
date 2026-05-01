@@ -1,17 +1,20 @@
-"""Zonestream → hourly NDJSON.zst partitions.
+"""Zonestream → hourly partitions, two on-disk formats.
 
-Designed for a GitHub Actions runner with a hard wall-clock limit:
-- ZS_RUN_SECONDS  : how long to consume before exiting cleanly (default 5h45m)
-- ZS_TOPICS       : comma-separated Kafka topic list
-- ZS_GROUP_ID     : Kafka consumer group; broker is the offset authority
-- ZS_OFFSET_RESET : 'earliest' (default) or 'latest', honored only when the
-                    group has no committed offset
-- ZS_FLUSH_SECONDS: fsync + commit cadence in seconds (default 60)
+JSON topics land in ``data/<topic>/YYYY/MM/DD/HH.jsonl.zst`` (one JSON document
+per line, raw broker payload, no reformatting).
 
-Writes to data/<topic>/YYYY/MM/DD/HH.jsonl.zst, appending raw broker payloads
-(one JSON document per line, no reformatting). Offsets are committed to the
-broker only after the local zstd writer has been flushed, so at-least-once
-delivery holds.
+Binary topics (Avro-on-the-wire) land in ``data/<topic>/YYYY/MM/DD/HH.kfb.zst``
+using a length-prefixed framing — see KAFKA_FRAMING.md. We preserve the wire
+bytes (Confluent magic + 4-byte schema id + Avro payload) plus the broker
+timestamp so the records can be decoded later when the schema becomes known.
+
+Env:
+- ZS_RUN_SECONDS   wall-clock budget (default 5h45m)
+- ZS_TOPICS        comma-separated topic list
+- ZS_GROUP_ID      Kafka consumer group; broker is the offset authority
+- ZS_OFFSET_RESET  earliest|latest, applied only when the group has no offsets
+- ZS_FLUSH_SECONDS fsync + commit cadence (default 60)
+- ZS_BOOTSTRAP     override broker (default kafka.zonestream.openintel.nl:9092)
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import struct
 import sys
 import time
 from pathlib import Path
@@ -32,10 +36,26 @@ BOOTSTRAP = os.environ.get(
 DATA_ROOT = Path("data")
 STATE_PATH = Path("state/offsets.json")
 
+# Per-topic on-disk format. Anything not listed here defaults to "binary"
+# (lossless framed bytes), which is the safe choice for an unknown topic.
+TOPIC_FORMAT: dict[str, str] = {
+    "newly_registered_domain": "json",
+    "newly_registered_fqdn": "json",
+    "confirmed_newly_registered_domain": "json",
+    "certstream": "json",
+    "certstream_domains": "json",
+    "newly_issued_certificates_measurements": "binary",
+    "newly_registered_domains_measurements": "binary",
+    "newly_registered_fqdn_measurements": "binary",
+}
+
+# .kfb.zst frame: u64-BE timestamp_ms || u32-BE payload_len || payload bytes
+_KFB_HDR = struct.Struct(">QI")
+
 
 def consumer_config() -> dict:
     # Zonestream Kafka is anonymous and unencrypted (PLAINTEXT on :9092),
-    # see https://zonestream.openintel.nl/. No SASL or TLS client cert.
+    # see https://openintel.nl/data/zonestream/. No SASL or TLS client cert.
     return {
         "bootstrap.servers": BOOTSTRAP,
         "group.id": os.environ["ZS_GROUP_ID"],
@@ -49,39 +69,52 @@ def consumer_config() -> dict:
 
 
 class HourlyWriters:
-    """One zstd stream writer per (topic, UTC hour). Closed at flush time."""
+    """One zstd stream writer per (topic, UTC hour)."""
 
     def __init__(self, level: int = 10):
         self._level = level
-        self._open: dict[tuple[str, str], tuple[object, object]] = {}
+        self._open: dict[tuple[str, str], tuple[object, object, str]] = {}
+
+    def _path(self, topic: str, hour: str) -> Path:
+        fmt = TOPIC_FORMAT.get(topic, "binary")
+        suffix = "jsonl.zst" if fmt == "json" else "kfb.zst"
+        return DATA_ROOT / topic / f"{hour}.{suffix}"
+
+    def _open_writer(self, topic: str, hour: str):
+        fmt = TOPIC_FORMAT.get(topic, "binary")
+        path = self._path(topic, hour)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        raw = open(path, "ab")
+        cctx = zstd.ZstdCompressor(level=self._level)
+        writer = cctx.stream_writer(raw, closefd=True)
+        return raw, writer, fmt
 
     def write(self, topic: str, ts_ms: int, payload: bytes) -> Path:
         hour = time.strftime("%Y/%m/%d/%H", time.gmtime(ts_ms / 1000.0))
         key = (topic, hour)
         if key not in self._open:
-            path = DATA_ROOT / topic / f"{hour}.jsonl.zst"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            raw = open(path, "ab")
-            cctx = zstd.ZstdCompressor(level=self._level)
-            writer = cctx.stream_writer(raw, closefd=True)
-            self._open[key] = (raw, writer)
-        _, writer = self._open[key]
-        writer.write(payload)
-        if not payload.endswith(b"\n"):
-            writer.write(b"\n")
-        return DATA_ROOT / topic / f"{hour}.jsonl.zst"
+            self._open[key] = self._open_writer(topic, hour)
+        _, writer, fmt = self._open[key]
+        if fmt == "json":
+            writer.write(payload)
+            if not payload.endswith(b"\n"):
+                writer.write(b"\n")
+        else:
+            writer.write(_KFB_HDR.pack(ts_ms, len(payload)))
+            writer.write(payload)
+        return self._path(topic, hour)
 
     def flush_all(self) -> list[Path]:
         flushed: list[Path] = []
-        for (topic, hour), (raw, writer) in list(self._open.items()):
+        for (topic, hour), (raw, writer, _fmt) in list(self._open.items()):
             writer.flush(zstd.FLUSH_FRAME)
             raw.flush()
             os.fsync(raw.fileno())
-            flushed.append(DATA_ROOT / topic / f"{hour}.jsonl.zst")
+            flushed.append(self._path(topic, hour))
         return flushed
 
     def close_all(self) -> None:
-        for (raw, writer) in self._open.values():
+        for (raw, writer, _fmt) in self._open.values():
             writer.close()
             raw.close()
         self._open.clear()
@@ -112,6 +145,11 @@ def main() -> int:
         print("no topics configured", file=sys.stderr)
         return 2
 
+    print(f"topics: {topics}")
+    print("formats: " + ", ".join(
+        f"{t}={TOPIC_FORMAT.get(t, 'binary')}" for t in topics
+    ))
+
     deadline = time.monotonic() + run_seconds
 
     consumer = Consumer(consumer_config())
@@ -126,6 +164,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
 
+    per_topic: dict[str, int] = {t: 0 for t in topics}
     msgs_seen = 0
     msgs_flushed = 0
     last_flush = time.monotonic()
@@ -150,6 +189,7 @@ def main() -> int:
             if ts_ms <= 0:
                 ts_ms = int(time.time() * 1000)
             writers.write(msg.topic(), ts_ms, msg.value())
+            per_topic[msg.topic()] = per_topic.get(msg.topic(), 0) + 1
             msgs_seen += 1
 
             if time.monotonic() - last_flush >= flush_seconds:
@@ -167,10 +207,9 @@ def main() -> int:
             writers.close_all()
             consumer.close()
 
-    print(
-        f"done: msgs_seen={msgs_seen} msgs_committed={msgs_flushed} "
-        f"topics={','.join(topics)}"
-    )
+    print(f"done: msgs_seen={msgs_seen} msgs_committed={msgs_flushed}")
+    for t in topics:
+        print(f"  {t}: {per_topic.get(t, 0)} msgs")
     return 0
 
 

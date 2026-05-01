@@ -18,9 +18,9 @@ on:
         required: false
         default: 'kafka'
       topics:
-        description: 'Comma-separated topics. Default = newly_registered_domain only. Use newly_registered_domain,newly_registered_fqdn for FQDN firehose; zone_diff requires auth.'
+        description: 'Comma-separated topics. Defaults to all 8 known topics; override to subset.'
         required: false
-        default: 'newly_registered_domain'
+        default: 'newly_registered_domain,newly_registered_fqdn,confirmed_newly_registered_domain,certstream,certstream_domains,newly_issued_certificates_measurements,newly_registered_domains_measurements,newly_registered_fqdn_measurements'
 
 concurrency:
   group: zonestream-consume
@@ -34,10 +34,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350        # 5h50m, leaves room for commit/push
     env:
-      # Default = the small, signal-rich topic. newly_registered_fqdn is a
-      # wildcard-heavy firehose (~10x volume) and zone_diff requires auth.
-      # Override per run via the topics input or globally via vars.ZS_TOPICS.
-      ZS_TOPICS: ${{ inputs.topics || vars.ZS_TOPICS || 'newly_registered_domain' }}
+      # Defaults: all 8 known broker topics. JSON-shaped topics land as
+      # *.jsonl.zst, Avro/binary topics as *.kfb.zst (see KAFKA_FRAMING.md).
+      # Override per-run with the `topics` input or globally with vars.ZS_TOPICS.
+      ZS_TOPICS: ${{ inputs.topics || vars.ZS_TOPICS || 'newly_registered_domain,newly_registered_fqdn,confirmed_newly_registered_domain,certstream,certstream_domains,newly_issued_certificates_measurements,newly_registered_domains_measurements,newly_registered_fqdn_measurements' }}
       # Group id is not a secret — it just labels your consumer offsets on the
       # broker. Override it in repo *Variables* (not Secrets) if you want.
       ZS_GROUP_ID: ${{ vars.ZS_GROUP_ID || format('gha-archive-{0}', github.repository_id) }}

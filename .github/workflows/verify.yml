@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      ZS_TOPICS: 'newly_registered_domain,newly_registered_fqdn,zone_diff'
+      ZS_TOPICS: 'newly_registered_domain,newly_registered_fqdn,confirmed_newly_registered_domain,certstream,certstream_domains,newly_issued_certificates_measurements,newly_registered_domains_measurements,newly_registered_fqdn_measurements'
       ZS_DAY: ${{ inputs.day }}
       SAMPLE_RATE: ${{ inputs.sample_rate || '0.01' }}
       GH_TOKEN: ${{ github.token }}

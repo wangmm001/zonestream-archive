@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/zonestream/certstream.json",
+  "title": "certstream (raw CT log mirror, permissive)",
+  "type": "object",
+  "required": ["data", "message_type"],
+  "properties": {
+    "data":         {"type": "object"},
+    "message_type": {"type": "string"}
+  },
+  "additionalProperties": true
+}

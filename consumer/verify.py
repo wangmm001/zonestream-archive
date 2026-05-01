@@ -19,6 +19,7 @@ import io
 import json
 import os
 import random
+import struct
 import subprocess
 import sys
 import tarfile
@@ -30,6 +31,7 @@ from jsonschema import Draft202012Validator
 
 SCHEMAS_DIR = Path("consumer/schemas")
 WORK_DIR = Path("dist-verify")
+_KFB_HDR = struct.Struct(">QI")  # u64 ts_ms, u32 payload_len
 
 
 def yesterday_utc() -> str:
@@ -72,24 +74,47 @@ def sha256_of(path: Path) -> str:
     return h.hexdigest()
 
 
-def iter_jsonl_zst(asset: Path):
+def _iter_tar_members(asset: Path, suffix: str):
+    """Yield (member_name, raw_inner_stream) for each tar member matching suffix."""
     with open(asset, "rb") as f:
         outer = zstd.ZstdDecompressor().stream_reader(f)
         with tarfile.open(fileobj=outer, mode="r|") as tar:
             for member in tar:
-                if not member.isfile() or not member.name.endswith(".jsonl.zst"):
+                if not member.isfile() or not member.name.endswith(suffix):
                     continue
                 inner = tar.extractfile(member)
                 if inner is None:
                     continue
-                dctx = zstd.ZstdDecompressor()
-                with dctx.stream_reader(inner) as r:
-                    buf = io.TextIOWrapper(r, encoding="utf-8")
-                    for line in buf:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        yield member.name, line
+                yield member.name, inner
+
+
+def iter_jsonl_zst(asset: Path):
+    """Decompress each .jsonl.zst tar member and yield (member, line)."""
+    for name, inner in _iter_tar_members(asset, ".jsonl.zst"):
+        with zstd.ZstdDecompressor().stream_reader(inner) as r:
+            buf = io.TextIOWrapper(r, encoding="utf-8")
+            for line in buf:
+                line = line.strip()
+                if not line:
+                    continue
+                yield name, line
+
+
+def iter_kfb_zst(asset: Path):
+    """Yield (member, ts_ms, payload) for each .kfb.zst tar member."""
+    for name, inner in _iter_tar_members(asset, ".kfb.zst"):
+        with zstd.ZstdDecompressor().stream_reader(inner) as r:
+            while True:
+                head = r.read(_KFB_HDR.size)
+                if not head:
+                    return
+                if len(head) < _KFB_HDR.size:
+                    raise ValueError(f"{name}: truncated header")
+                ts_ms, ln = _KFB_HDR.unpack(head)
+                payload = r.read(ln)
+                if len(payload) != ln:
+                    raise ValueError(f"{name}: truncated payload")
+                yield name, ts_ms, payload
 
 
 def load_validator(topic: str) -> Draft202012Validator | None:
@@ -133,29 +158,50 @@ def main() -> int:
             continue
 
         validator = load_validator(topic)
+        is_binary = (validator is None) or (topic.endswith("_measurements"))
         n_total = n_sampled = n_bad = 0
-        for member, line in iter_jsonl_zst(asset):
-            n_total += 1
-            if rng.random() > sample_rate:
-                continue
-            n_sampled += 1
-            try:
-                obj = json.loads(line)
-            except Exception as exc:
-                n_bad += 1
-                if n_bad <= 5:
-                    failures.append(f"{asset_name}::{member}: invalid JSON ({exc})")
-                continue
-            if validator is None:
-                continue
-            errs = list(validator.iter_errors(obj))
-            if errs:
-                n_bad += 1
-                if n_bad <= 5:
-                    failures.append(
-                        f"{asset_name}::{member}: schema fail ({errs[0].message})"
-                    )
-        print(f"  + {asset_name}: lines={n_total} sampled={n_sampled} bad={n_bad}")
+        try:
+            if is_binary:
+                # .kfb.zst — verify framing integrity, schema id sanity, sample.
+                for member, ts_ms, payload in iter_kfb_zst(asset):
+                    n_total += 1
+                    if rng.random() > sample_rate:
+                        continue
+                    n_sampled += 1
+                    if len(payload) < 5 or payload[0] != 0x00:
+                        n_bad += 1
+                        if n_bad <= 5:
+                            failures.append(
+                                f"{asset_name}::{member}: bad Confluent framing "
+                                f"(first byte 0x{payload[:1].hex()})"
+                            )
+            else:
+                for member, line in iter_jsonl_zst(asset):
+                    n_total += 1
+                    if rng.random() > sample_rate:
+                        continue
+                    n_sampled += 1
+                    try:
+                        obj = json.loads(line)
+                    except Exception as exc:
+                        n_bad += 1
+                        if n_bad <= 5:
+                            failures.append(
+                                f"{asset_name}::{member}: invalid JSON ({exc})"
+                            )
+                        continue
+                    errs = list(validator.iter_errors(obj))
+                    if errs:
+                        n_bad += 1
+                        if n_bad <= 5:
+                            failures.append(
+                                f"{asset_name}::{member}: schema fail "
+                                f"({errs[0].message})"
+                            )
+        except ValueError as exc:
+            failures.append(f"{asset_name}: framing error: {exc}")
+        kind = "frames" if is_binary else "lines"
+        print(f"  + {asset_name}: {kind}={n_total} sampled={n_sampled} bad={n_bad}")
 
     if failures:
         print("\nFAIL", file=sys.stderr)

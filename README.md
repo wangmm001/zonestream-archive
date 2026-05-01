@@ -25,13 +25,25 @@ reaper.yml  – watchdog, opens an issue if no commit in 12h
 
 ## Topics
 
-| topic                       | default? | notes                                     |
-|-----------------------------|----------|-------------------------------------------|
-| `newly_registered_domain`   | **yes**  | ~5 % of total stream volume, signal-rich  |
-| `newly_registered_fqdn`     | no       | wildcard firehose, ~10× the volume; opt in via dispatch input or `vars.ZS_TOPICS` |
-| `zone_diff`                 | no       | requires auth (anon `kafka:9092` returns `TOPIC_AUTHORIZATION_FAILED`) |
+All eight known broker topics are archived by default. JSON-shaped topics land
+as `*.jsonl.zst` (one record per line), Avro-on-the-wire topics land as
+`*.kfb.zst` (length-prefix framed raw bytes — see [KAFKA_FRAMING.md](KAFKA_FRAMING.md)).
 
-Schemas live under `consumer/schemas/` and are intentionally permissive.
+| topic                                   | format | live rate    | notes |
+|-----------------------------------------|--------|--------------|-------|
+| `newly_registered_domain`               | JSON   | ~150 K/day   | apex first-seen from CT logs |
+| `newly_registered_fqdn`                 | JSON   | ~150 K/day   | apex + subdomain first-seen |
+| `confirmed_newly_registered_domain`     | JSON   | ~18 K/day    | DarkDNS-validated, has `confidence` |
+| `certstream`                            | JSON   | TBD          | raw CT log mirror |
+| `certstream_domains`                    | JSON   | TBD          | per-cert `domain_list`/`sld_list` |
+| `newly_issued_certificates_measurements`| Avro   | TBD          | active DNS measurement, schema unknown |
+| `newly_registered_domains_measurements` | Avro   | TBD          | active DNS measurement, schema unknown |
+| `newly_registered_fqdn_measurements`    | Avro   | TBD          | active DNS measurement, schema unknown |
+
+Schemas live under `consumer/schemas/`. Avro topics carry the Confluent
+framing (`0x00 || u32-BE schema_id || avro_payload`) — until OpenINTEL exposes
+a schema registry, those payloads are preserved verbatim and can be replayed
+through any future decoder.
 
 ## Setup
 

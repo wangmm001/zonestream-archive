@@ -1,14 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.invalid/zonestream/newly_registered_domain.json",
-  "title": "newly_registered_domain (permissive)",
-  "description": "Tighten this once payload distribution is empirically known.",
+  "title": "newly_registered_domain (CT-derived)",
   "type": "object",
-  "minProperties": 1,
-  "anyOf": [
-    {"required": ["domain"]},
-    {"required": ["fqdn"]},
-    {"required": ["name"]}
-  ],
+  "required": ["domain", "cert_index", "ct_name", "timestamp"],
+  "properties": {
+    "domain":               {"type": "string", "minLength": 1},
+    "cert_index":           {"type": "integer", "minimum": 0},
+    "ct_name":              {"type": "string"},
+    "timestamp":            {"type": "integer", "minimum": 0},
+    "submission_timestamp": {"type": "number"}
+  },
   "additionalProperties": true
 }

@@ -1,13 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.invalid/zonestream/newly_registered_fqdn.json",
-  "title": "newly_registered_fqdn (permissive)",
+  "title": "newly_registered_fqdn (CT-derived)",
   "type": "object",
-  "minProperties": 1,
-  "anyOf": [
-    {"required": ["fqdn"]},
-    {"required": ["domain"]},
-    {"required": ["name"]}
-  ],
+  "required": ["fqdn", "cert_index", "ct_name", "timestamp"],
+  "properties": {
+    "fqdn":                 {"type": "string", "minLength": 1},
+    "cert_index":           {"type": "integer", "minimum": 0},
+    "ct_name":              {"type": "string"},
+    "timestamp":            {"type": "integer", "minimum": 0},
+    "submission_timestamp": {"type": "number"}
+  },
   "additionalProperties": true
 }
