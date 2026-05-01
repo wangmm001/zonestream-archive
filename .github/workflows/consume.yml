@@ -18,9 +18,9 @@ on:
         required: false
         default: 'kafka'
       topics:
-        description: 'Comma-separated topics. Defaults to all 8 known topics; override to subset.'
+        description: 'Comma-separated topics. Default = 3 lean JSON topics (~24 MB/day total). Adding the 5 high-volume topics blows past GitHub limits — see README.'
         required: false
-        default: 'newly_registered_domain,newly_registered_fqdn,confirmed_newly_registered_domain,certstream,certstream_domains,newly_issued_certificates_measurements,newly_registered_domains_measurements,newly_registered_fqdn_measurements'
+        default: 'newly_registered_domain,newly_registered_fqdn,confirmed_newly_registered_domain'
 
 concurrency:
   group: zonestream-consume
@@ -34,10 +34,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350        # 5h50m, leaves room for commit/push
     env:
-      # Defaults: all 8 known broker topics. JSON-shaped topics land as
-      # *.jsonl.zst, Avro/binary topics as *.kfb.zst (see KAFKA_FRAMING.md).
-      # Override per-run with the `topics` input or globally with vars.ZS_TOPICS.
-      ZS_TOPICS: ${{ inputs.topics || vars.ZS_TOPICS || 'newly_registered_domain,newly_registered_fqdn,confirmed_newly_registered_domain,certstream,certstream_domains,newly_issued_certificates_measurements,newly_registered_domains_measurements,newly_registered_fqdn_measurements' }}
+      # Defaults: 3 lean topics (~24 MB/day total). The other 5 topics —
+      # certstream{,_domains} and the 3 *_measurements — together produce
+      # ~49 GiB/day, which doesn't fit on GitHub. To enable them, point the
+      # consumer at object storage (S3/R2/B2) instead of pushing to git.
+      ZS_TOPICS: ${{ inputs.topics || vars.ZS_TOPICS || 'newly_registered_domain,newly_registered_fqdn,confirmed_newly_registered_domain' }}
       # Group id is not a secret — it just labels your consumer offsets on the
       # broker. Override it in repo *Variables* (not Secrets) if you want.
       ZS_GROUP_ID: ${{ vars.ZS_GROUP_ID || format('gha-archive-{0}', github.repository_id) }}

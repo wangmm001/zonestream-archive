@@ -25,25 +25,32 @@ reaper.yml  – watchdog, opens an issue if no commit in 12h
 
 ## Topics
 
-All eight known broker topics are archived by default. JSON-shaped topics land
-as `*.jsonl.zst` (one record per line), Avro-on-the-wire topics land as
-`*.kfb.zst` (length-prefix framed raw bytes — see [KAFKA_FRAMING.md](KAFKA_FRAMING.md)).
+Eight topics live on the public broker (`kafka.zonestream.openintel.nl:9092`,
+anonymous). Only the three small JSON ones are archived by default — the
+other five together produce ~49 GiB/day, which does not fit on GitHub.
 
-| topic                                   | format | live rate    | notes |
-|-----------------------------------------|--------|--------------|-------|
-| `newly_registered_domain`               | JSON   | ~150 K/day   | apex first-seen from CT logs |
-| `newly_registered_fqdn`                 | JSON   | ~150 K/day   | apex + subdomain first-seen |
-| `confirmed_newly_registered_domain`     | JSON   | ~18 K/day    | DarkDNS-validated, has `confidence` |
-| `certstream`                            | JSON   | TBD          | raw CT log mirror |
-| `certstream_domains`                    | JSON   | TBD          | per-cert `domain_list`/`sld_list` |
-| `newly_issued_certificates_measurements`| Avro   | TBD          | active DNS measurement, schema unknown |
-| `newly_registered_domains_measurements` | Avro   | TBD          | active DNS measurement, schema unknown |
-| `newly_registered_fqdn_measurements`    | Avro   | TBD          | active DNS measurement, schema unknown |
+| topic                                   | format | day volume | default |
+|-----------------------------------------|--------|-----------:|---------|
+| `newly_registered_domain`               | JSON   | ~11 MB     | ✅       |
+| `newly_registered_fqdn`                 | JSON   | ~12 MB     | ✅       |
+| `confirmed_newly_registered_domain`     | JSON   | ~1 MB      | ✅       |
+| `certstream`                            | JSON   | ~15 GB     | —        |
+| `certstream_domains`                    | JSON   | ~8.6 GB    | —        |
+| `newly_issued_certificates_measurements`| Avro   | ~9 GB      | —        |
+| `newly_registered_domains_measurements` | Avro   | ~9.7 GB    | —        |
+| `newly_registered_fqdn_measurements`    | Avro   | ~8.4 GB    | —        |
 
-Schemas live under `consumer/schemas/`. Avro topics carry the Confluent
-framing (`0x00 || u32-BE schema_id || avro_payload`) — until OpenINTEL exposes
-a schema registry, those payloads are preserved verbatim and can be replayed
-through any future decoder.
+JSON topics land as `*.jsonl.zst` (one record per line). Avro-on-the-wire
+topics use Confluent framing (`0x00 || u32-BE schema_id || avro_payload`) and
+are stored as `*.kfb.zst` — see [KAFKA_FRAMING.md](KAFKA_FRAMING.md). Schemas
+under `consumer/schemas/` are JSON Schema for the JSON topics; Avro schemas
+are not yet published by OpenINTEL, so binary payloads are preserved verbatim
+for later replay.
+
+To temporarily enable a high-volume topic, dispatch `consume.yml` with the
+`topics` input. To make a long-term change, set `vars.ZS_TOPICS` in repo
+settings — but plan for object storage offload (S3/R2/B2) before doing so;
+this archive's git+release path tops out around ~50 MB/day.
 
 ## Setup
 
