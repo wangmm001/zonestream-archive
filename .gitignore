@@ -1,4 +1,5 @@
 .secrets/
+.claude/
 *.pyc
 __pycache__/
 .venv/
