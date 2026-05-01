@@ -35,6 +35,10 @@ BOOTSTRAP = os.environ.get(
 )
 DATA_ROOT = Path("data")
 STATE_PATH = Path("state/offsets.json")
+# Each run writes its own per-hour file so two runs can never collide on the
+# same path (zstd files are not git-mergeable). Rollover still bundles all
+# fragments for a calendar day into one release asset.
+RUN_TAG = os.environ.get("GITHUB_RUN_ID", "local")
 
 # Per-topic on-disk format. Anything not listed here defaults to "binary"
 # (lossless framed bytes), which is the safe choice for an unknown topic.
@@ -78,7 +82,7 @@ class HourlyWriters:
     def _path(self, topic: str, hour: str) -> Path:
         fmt = TOPIC_FORMAT.get(topic, "binary")
         suffix = "jsonl.zst" if fmt == "json" else "kfb.zst"
-        return DATA_ROOT / topic / f"{hour}.{suffix}"
+        return DATA_ROOT / topic / f"{hour}-r{RUN_TAG}.{suffix}"
 
     def _open_writer(self, topic: str, hour: str):
         fmt = TOPIC_FORMAT.get(topic, "binary")

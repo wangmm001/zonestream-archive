@@ -26,6 +26,7 @@ import zstandard as zstd
 
 DEFAULT_WS_BASE = "wss://zonestream.openintel.nl/ws"
 DATA_ROOT = Path("data")
+RUN_TAG = os.environ.get("GITHUB_RUN_ID", "local")
 
 
 async def consume_topic(topic: str, base: str, deadline: float, stop: asyncio.Event):
@@ -57,7 +58,7 @@ def write_record(topic: str, payload: bytes) -> None:
     line = (json.dumps(obj, ensure_ascii=False) + "\n").encode()
 
     hour = time.strftime("%Y/%m/%d/%H", time.gmtime())
-    path = DATA_ROOT / topic / f"{hour}.jsonl.zst"
+    path = DATA_ROOT / topic / f"{hour}-r{RUN_TAG}.jsonl.zst"
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "ab") as raw:
         cctx = zstd.ZstdCompressor(level=10)
