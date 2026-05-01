@@ -1,0 +1,294 @@
+name: daily
+
+# One scheduled run per UTC day:
+#   1) consume — drain everything since the last commit (~1–2 min for 24 h
+#      of the 3 lean topics; budget 10 min for slack).
+#   2) rollover — pack yesterday's _partial fragments into the flat
+#      <topic>-<DAY>.jsonl.gz Release asset, refresh INDEX.md.
+#   3) verify — sample-check the just-uploaded release.
+#
+# 00:30 UTC (instead of 00:00) gives Kafka 30 min to absorb any straggler
+# messages with timestamps just before midnight, so yesterday's partition is
+# truly closed by the time we pack it.
+
+on:
+  schedule:
+    - cron: '30 0 * * *'
+  workflow_dispatch:
+    inputs:
+      day:
+        description: 'Day to roll over / verify (YYYY-MM-DD, default = yesterday UTC)'
+        required: false
+      run_seconds:
+        description: 'Consume budget in seconds'
+        required: false
+        default: '600'
+      offset_reset:
+        description: 'auto.offset.reset on first connect (earliest|latest)'
+        required: false
+        default: 'earliest'
+      topics:
+        description: 'Comma-separated topics'
+        required: false
+        default: 'newly_registered_domain,newly_registered_fqdn,confirmed_newly_registered_domain'
+      transport:
+        description: 'kafka or ws'
+        required: false
+        default: 'kafka'
+      skip_consume:
+        description: 'Skip the consume job (re-run rollover/verify only)'
+        type: boolean
+        default: false
+      skip_rollover:
+        description: 'Skip rollover + verify (consume only)'
+        type: boolean
+        default: false
+      sample_rate:
+        description: 'Verify sampling fraction'
+        required: false
+        default: '0.01'
+
+concurrency:
+  group: zonestream-daily
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  consume:
+    if: ${{ !inputs.skip_consume }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ZS_TOPICS: ${{ inputs.topics || vars.ZS_TOPICS || 'newly_registered_domain,newly_registered_fqdn,confirmed_newly_registered_domain' }}
+      ZS_GROUP_ID: ${{ vars.ZS_GROUP_ID || format('gha-archive-{0}', github.repository_id) }}
+      ZS_RUN_SECONDS: ${{ inputs.run_seconds || '600' }}
+      ZS_OFFSET_RESET: ${{ inputs.offset_reset || 'earliest' }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: 'consumer/requirements.txt'
+
+      - run: pip install -r consumer/requirements.txt
+
+      - name: Consume (kafka)
+        if: ${{ inputs.transport != 'ws' }}
+        run: python consumer/kafka_consumer.py
+
+      - name: Consume (websocket fallback)
+        if: ${{ inputs.transport == 'ws' }}
+        run: python consumer/ws_consumer.py
+
+      - name: Show what changed
+        if: always()
+        run: |
+          du -sh data/ 2>/dev/null || true
+          git status --short || true
+
+      - name: Commit hourly partitions
+        id: push
+        if: always()
+        run: |
+          set -e
+          git config user.name  "zonestream-bot"
+          git config user.email "zonestream-bot@users.noreply.github.com"
+          git add -A data/ state/
+          if git diff --cached --quiet; then
+            echo "no changes to commit"
+            echo "pushed=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git commit -m "data: $(date -u +%FT%H:%MZ) batch (run ${GITHUB_RUN_ID})"
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && \
+              git push origin "HEAD:${GITHUB_REF_NAME}" && \
+              { echo "pushed=ok" >> "$GITHUB_OUTPUT"; exit 0; }
+            sleep $((i * 5))
+          done
+          exit 1
+
+      - name: Finalize broker offsets
+        # Only advance broker offsets after data is durably in git. If this
+        # step is skipped (push failed, no-data run, …) the broker keeps the
+        # previous offsets and the next run safely re-reads.
+        if: steps.push.outputs.pushed == 'ok'
+        env:
+          ZS_GROUP_ID: ${{ env.ZS_GROUP_ID }}
+        run: python consumer/finalize_offsets.py
+
+  rollover:
+    needs: consume
+    if: ${{ always() && !inputs.skip_rollover && (needs.consume.result == 'success' || (needs.consume.result == 'skipped' && inputs.skip_consume)) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TOPICS: ${{ inputs.topics || vars.ZS_TOPICS || 'newly_registered_domain,newly_registered_fqdn,confirmed_newly_registered_domain' }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: 'consumer/requirements.txt'
+
+      - run: pip install -r consumer/requirements.txt
+
+      - name: Resolve day
+        id: day
+        run: |
+          if [ -n "${{ inputs.day }}" ]; then
+            echo "day=${{ inputs.day }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "day=$(date -u -d 'yesterday' +%F)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Pack each topic
+        id: pack
+        run: |
+          set -euo pipefail
+          DAY="${{ steps.day.outputs.day }}"
+          mkdir -p _release
+          : > _release/SHA256SUMS
+          packed=0
+          IFS=',' read -ra TOPIC_ARR <<< "$TOPICS"
+          for T in "${TOPIC_ARR[@]}"; do
+            T=$(echo "$T" | xargs)
+            [ -z "$T" ] && continue
+            out=$(python consumer/pack_day.py "$T" "$DAY") || true
+            if [ -z "$out" ]; then
+              echo "skip ${T}: no fragments for ${DAY}"
+              continue
+            fi
+            path=$(echo "$out" | cut -f1)
+            sha=$(echo "$out"  | cut -f3)
+            ext="${path#*.}"
+            asset="${T}-${DAY}.${ext}"
+            cp "$path" "_release/${asset}"
+            ( cd _release && echo "$sha  ${asset}" >> SHA256SUMS )
+            packed=$((packed+1))
+          done
+          echo "packed=$packed" >> "$GITHUB_OUTPUT"
+          ls -la _release/ || true
+
+      - name: Create / update Release
+        if: steps.pack.outputs.packed != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DAY="${{ steps.day.outputs.day }}"
+          TAG="snap-${DAY}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" --clobber _release/*
+          else
+            gh release create "$TAG" \
+              --title "Zonestream snapshot ${DAY}" \
+              --notes-file _release/SHA256SUMS \
+              _release/*
+          fi
+
+      - name: Prune _partial fragments and commit
+        if: steps.pack.outputs.packed != '0'
+        run: |
+          set -e
+          DAY="${{ steps.day.outputs.day }}"
+          IFS=',' read -ra TOPIC_ARR <<< "$TOPICS"
+          for T in "${TOPIC_ARR[@]}"; do
+            T=$(echo "$T" | xargs)
+            git rm -rf "data/${T}/_partial/${DAY}" 2>/dev/null || true
+          done
+          git add -A data/
+          git config user.name  "zonestream-bot"
+          git config user.email "zonestream-bot@users.noreply.github.com"
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+            exit 0
+          fi
+          git commit -m "rollover: ${DAY} → snap-${DAY}"
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && \
+              git push origin "HEAD:${GITHUB_REF_NAME}" && exit 0
+            sleep $((i * 5))
+          done
+          exit 1
+
+      - name: Refresh INDEX.md
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          {
+            echo
+            gh release list --limit 200 --json tagName,name,publishedAt \
+              --jq 'sort_by(.publishedAt) | reverse | .[] | "- [\(.tagName)](https://github.com/${{ github.repository }}/releases/tag/\(.tagName)) — \(.publishedAt[:10])"'
+            echo
+          } > /tmp/index_block
+          python - <<'PY'
+          import pathlib, re
+          p = pathlib.Path("INDEX.md")
+          src = p.read_text()
+          block = pathlib.Path("/tmp/index_block").read_text()
+          out = re.sub(r"(?s)<!-- INDEX:BEGIN -->.*?<!-- INDEX:END -->",
+                       f"<!-- INDEX:BEGIN -->{block}<!-- INDEX:END -->", src)
+          p.write_text(out)
+          PY
+          git config user.name  "zonestream-bot"
+          git config user.email "zonestream-bot@users.noreply.github.com"
+          if ! git diff --quiet -- INDEX.md; then
+            git add INDEX.md
+            git commit -m "index: refresh"
+            for i in 1 2 3; do
+              git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && \
+                git push origin "HEAD:${GITHUB_REF_NAME}" && exit 0
+              sleep $((i * 5))
+            done
+          fi
+
+  verify:
+    needs: rollover
+    if: ${{ needs.rollover.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ZS_TOPICS: ${{ inputs.topics || vars.ZS_TOPICS || 'newly_registered_domain,newly_registered_fqdn,confirmed_newly_registered_domain' }}
+      ZS_DAY: ${{ inputs.day }}
+      SAMPLE_RATE: ${{ inputs.sample_rate || '0.01' }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: 'consumer/requirements.txt'
+      - run: pip install -r consumer/requirements.txt
+
+      - id: verify
+        run: python consumer/verify.py
+        continue-on-error: true
+
+      - name: File issue on failure
+        if: steps.verify.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DAY="${ZS_DAY:-$(date -u -d 'yesterday' +%F)}"
+          gh issue create \
+            --title "verify failed for snap-${DAY}" \
+            --label "verify-failure" \
+            --body "Run: <https://github.com/${{ github.repository }}/actions/runs/${GITHUB_RUN_ID}>"
+          exit 1

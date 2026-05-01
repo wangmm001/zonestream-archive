@@ -50,7 +50,7 @@ def find_open_issue() -> int | None:
 
 
 def main() -> int:
-    stale_hours = int(os.environ.get("ZS_STALE_HOURS", "12"))
+    stale_hours = int(os.environ.get("ZS_STALE_HOURS", "36"))
     last = last_data_commit_unix()
     now = int(time.time())
 
@@ -84,7 +84,7 @@ def main() -> int:
             ["gh", "issue", "comment", str(existing), "--body", body]
         )
 
-    subprocess.call(["gh", "workflow", "run", "consume.yml"])
+    subprocess.call(["gh", "workflow", "run", "daily.yml"])
     return 0
 
 

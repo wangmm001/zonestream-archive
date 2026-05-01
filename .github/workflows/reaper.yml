@@ -15,7 +15,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      ZS_STALE_HOURS: '12'
+      # Daily cadence: tolerate up to 36 h before paging (allows one full
+      # missed cycle plus GitHub cron drift).
+      ZS_STALE_HOURS: '36'
       GH_TOKEN: ${{ github.token }}
 
     steps:

@@ -27,22 +27,39 @@ one JSON document straight from the Kafka broker — see
 
 ## Pipeline
 
+A single `daily.yml` workflow runs once per UTC day and chains three jobs:
+
 ```
 Zonestream (Kafka :9092 anon / WebSocket /ws)
         │
-        ▼
-consume.yml  cron every 6 h, runs ≤5h45m
-        │  appends NDJSON+zstd into data/<topic>/_partial/<day>/<HH>-r<run>.jsonl.zst
-        ▼
-rollover.yml  cron 00:10 UTC daily
-        │  for each topic: cat _partial/<yesterday>/*.jsonl.zst → <yesterday>.jsonl.gz
-        │  copies → current.jsonl.gz
-        │  uploads <topic>-<yesterday>.jsonl.gz to release snap-<yesterday>
-        │  git rm _partial/<yesterday>/
-        ▼
-verify.yml  cron 01:30 UTC – sha256 + schema-sampling on the freshly-uploaded release
-reaper.yml  hourly watchdog, opens an issue if no commit lands for 12 h
+        ▼  daily.yml @ 00:30 UTC  (≈3 min total)
+┌─ consume   drain everything since last run, dedup-friendly write to
+│            data/<topic>/_partial/<day>/<HH>-r<run>.jsonl.zst.
+│            broker offsets are NOT advanced until git push succeeds —
+│            see consumer/finalize_offsets.py
+│
+├─ rollover  for each topic: pack _partial/<yesterday>/*.jsonl.zst →
+│            data/<topic>/<yesterday>.jsonl.gz (deterministic gzip,
+│            line-bytes dedup) → copy → current.jsonl.gz →
+│            upload as Release asset → git rm _partial/<yesterday>/
+│            → refresh INDEX.md
+│
+└─ verify    sha256-check + JSON-Schema-sample-validate the release
+             we just produced; opens an issue on failure
+
+reaper.yml hourly — opens an issue if no data commit lands for 36 h
 ```
+
+### Why daily
+
+Live message rate of the three default topics combined is ~5 records/s
+(~450 K/day). A single 10-minute drain comfortably covers ~24 h of backlog
+even with every-day-fails-for-a-week recovery. Kafka retains ~28 days, so
+even multiple consecutive failed days lose nothing — the next successful
+run reads the missing window from the broker.
+
+Real cost: `current.jsonl.gz` lags by up to ~24 h after the latest record.
+That's the only thing the daily cadence trades away.
 
 ## Topics
 
