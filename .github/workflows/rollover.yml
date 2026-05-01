@@ -68,8 +68,12 @@ jobs:
             fi
             path=$(echo "$out" | cut -f1)
             sha=$(echo "$out"  | cut -f3)
-            cp "$path" "_release/"
-            ( cd _release && echo "$sha  $(basename "$path")" >> SHA256SUMS )
+            # In git the path encodes the topic; in the release we flatten to
+            # one file per (topic, day) so they coexist as separate assets.
+            ext="${path#*.}"   # jsonl.gz or kfb.zst
+            asset="${T}-${DAY}.${ext}"
+            cp "$path" "_release/${asset}"
+            ( cd _release && echo "$sha  ${asset}" >> SHA256SUMS )
             packed=$((packed+1))
           done
           echo "packed=$packed" >> "$GITHUB_OUTPUT"
