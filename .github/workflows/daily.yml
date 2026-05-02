@@ -149,6 +149,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # Without ref:, checkout pins to github.sha (the commit that
+          # triggered the workflow). The previous job pushed new commits to
+          # main; we need those, so explicitly check out main.
+          ref: ${{ github.ref_name }}
           fetch-depth: 0
 
       - uses: actions/setup-python@v5
@@ -286,6 +290,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -305,6 +311,5 @@ jobs:
           DAY="${ZS_DAY:-$(date -u -d 'yesterday' +%F)}"
           gh issue create \
             --title "verify failed for snap-${DAY}" \
-            --label "verify-failure" \
             --body "Run: <https://github.com/${{ github.repository }}/actions/runs/${GITHUB_RUN_ID}>"
           exit 1
