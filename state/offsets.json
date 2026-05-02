@@ -1,31 +1,17 @@
 {
   "_meta": {
-    "captured_at": 1777644936,
+    "captured_at": 1777680573,
     "group_id": "gha-archive-1226425261",
-    "note": "Best-effort snapshot. Broker offsets are authoritative."
-  },
-  "certstream": {
-    "0": 32519889614
-  },
-  "certstream_domains": {
-    "0": 32526759891
+    "note": "Read positions reached by this run. Apply with finalize_offsets.py ONLY after data has been durably pushed to git.",
+    "run_id": "25238364963"
   },
   "confirmed_newly_registered_domain": {
-    "0": 48724462
-  },
-  "newly_issued_certificates_measurements": {
-    "0": 64255315831
+    "0": 48731417
   },
   "newly_registered_domain": {
-    "0": 102586712
-  },
-  "newly_registered_domains_measurements": {
-    "0": 82245111092
+    "0": 102646359
   },
   "newly_registered_fqdn": {
-    "0": 137145481
-  },
-  "newly_registered_fqdn_measurements": {
-    "0": 74291534810
+    "0": 137215170
   }
 }
