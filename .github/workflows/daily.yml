@@ -23,10 +23,10 @@ on:
         description: 'Hard wall-clock budget for consume (seconds)'
         required: false
         default: '600'
-      idle_exit_seconds:
-        description: 'Exit consume early after this many seconds with no new messages (0 disables)'
+      hwm_grace_seconds:
+        description: 'Exit consume after position == broker high-water-mark for this many seconds (0 disables)'
         required: false
-        default: '60'
+        default: '5'
       offset_reset:
         description: 'auto.offset.reset on first connect (earliest|latest)'
         required: false
@@ -69,7 +69,7 @@ jobs:
       ZS_TOPICS: ${{ inputs.topics || vars.ZS_TOPICS || 'newly_registered_domain,newly_registered_fqdn,confirmed_newly_registered_domain' }}
       ZS_GROUP_ID: ${{ vars.ZS_GROUP_ID || format('gha-archive-{0}', github.repository_id) }}
       ZS_RUN_SECONDS: ${{ inputs.run_seconds || '600' }}
-      ZS_IDLE_EXIT_SEC: ${{ inputs.idle_exit_seconds || '60' }}
+      ZS_HWM_GRACE_SEC: ${{ inputs.hwm_grace_seconds || '5' }}
       ZS_OFFSET_RESET: ${{ inputs.offset_reset || 'earliest' }}
 
     steps:

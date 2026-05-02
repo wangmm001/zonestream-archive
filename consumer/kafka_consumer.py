@@ -28,10 +28,12 @@ any future schema-aware decoder.
 
 Env:
 - ZS_RUN_SECONDS    hard wall-clock budget (default 600s = 10 min)
-- ZS_IDLE_EXIT_SEC  exit early if no new message arrives for this many
-                    consecutive seconds; 0 disables (default 60). With the
-                    default the consumer drains its backlog and stops within
-                    ~60 s of the last received message.
+- ZS_HWM_GRACE_SEC  after consumer position == broker high-water-mark for
+                    every assigned partition, keep polling this many extra
+                    seconds (default 5) before exiting. 0 disables → never
+                    early-exits. Replaces a naive "no message for N seconds"
+                    timer because live traffic on these topics is too dense
+                    (~2 msg/s) to ever idle.
 - ZS_TOPICS         comma-separated topic list
 - ZS_GROUP_ID       Kafka consumer group; broker is the offset authority
 - ZS_OFFSET_RESET   earliest|latest, applied only when the group has no offsets
@@ -182,10 +184,32 @@ def snapshot_offsets(consumer: Consumer) -> None:
     STATE_PATH.write_text(json.dumps(snap, sort_keys=True, indent=2))
 
 
+def is_caught_up(consumer: Consumer) -> bool:
+    """Has the consumer reached the broker's high-water mark on every partition?"""
+    assignments = consumer.assignment()
+    if not assignments:
+        return False
+    try:
+        positions = {(tp.topic, tp.partition): tp.offset
+                     for tp in consumer.position(assignments)}
+        for tp in assignments:
+            pos = positions.get((tp.topic, tp.partition), -1)
+            if pos < 0:
+                return False
+            _, hwm = consumer.get_watermark_offsets(tp, timeout=5, cached=True)
+            if pos < hwm:
+                return False
+        return True
+    except Exception as exc:
+        print(f"hwm check failed: {exc}", file=sys.stderr)
+        return False
+
+
 def main() -> int:
     run_seconds = int(os.environ.get("ZS_RUN_SECONDS", "600"))
-    idle_exit_seconds = int(os.environ.get("ZS_IDLE_EXIT_SEC", "60"))
+    hwm_grace = int(os.environ.get("ZS_HWM_GRACE_SEC", "5"))
     flush_seconds = int(os.environ.get("ZS_FLUSH_SECONDS", "60"))
+    hwm_check_seconds = 5
     topics = [t.strip() for t in os.environ["ZS_TOPICS"].split(",") if t.strip()]
     if not topics:
         print("no topics configured", file=sys.stderr)
@@ -216,45 +240,49 @@ def main() -> int:
     msgs_seen = 0
     msgs_flushed = 0
     last_flush = time.monotonic()
-    last_msg_at = time.monotonic()
-    grace_until = time.monotonic() + 30  # always poll for ≥30s before declaring idle
+    last_hwm_check = 0.0
+    caught_up_since: float | None = None
 
     try:
         while not stop["flag"] and time.monotonic() < deadline:
             msg = consumer.poll(1.0)
             now = time.monotonic()
             if msg is None:
-                if (
-                    idle_exit_seconds > 0
-                    and now > grace_until
-                    and (now - last_msg_at) >= idle_exit_seconds
-                ):
-                    stop["flag"] = True
-                    stop["reason"] = "idle"
-                    break
                 if now - last_flush >= flush_seconds:
                     writers.flush_all()
                     msgs_flushed = msgs_seen
                     last_flush = now
-                continue
-            if msg.error():
-                if msg.error().code() == KafkaError._PARTITION_EOF:
+            else:
+                if msg.error():
+                    if msg.error().code() == KafkaError._PARTITION_EOF:
+                        continue
+                    print(f"kafka error: {msg.error()}", file=sys.stderr)
                     continue
-                print(f"kafka error: {msg.error()}", file=sys.stderr)
-                continue
+                ts_type, ts_ms = msg.timestamp()
+                if ts_ms <= 0:
+                    ts_ms = int(time.time() * 1000)
+                writers.write(msg.topic(), ts_ms, msg.value())
+                per_topic[msg.topic()] = per_topic.get(msg.topic(), 0) + 1
+                msgs_seen += 1
 
-            ts_type, ts_ms = msg.timestamp()
-            if ts_ms <= 0:
-                ts_ms = int(time.time() * 1000)
-            writers.write(msg.topic(), ts_ms, msg.value())
-            per_topic[msg.topic()] = per_topic.get(msg.topic(), 0) + 1
-            msgs_seen += 1
-            last_msg_at = now
+                if now - last_flush >= flush_seconds:
+                    writers.flush_all()
+                    msgs_flushed = msgs_seen
+                    last_flush = now
 
-            if now - last_flush >= flush_seconds:
-                writers.flush_all()
-                msgs_flushed = msgs_seen
-                last_flush = now
+            # HWM-based early exit: if our position has caught the broker
+            # for at least `hwm_grace` seconds straight, stop polling.
+            if hwm_grace > 0 and now - last_hwm_check >= hwm_check_seconds:
+                last_hwm_check = now
+                if is_caught_up(consumer):
+                    if caught_up_since is None:
+                        caught_up_since = now
+                    elif now - caught_up_since >= hwm_grace:
+                        stop["flag"] = True
+                        stop["reason"] = "caught-up"
+                        break
+                else:
+                    caught_up_since = None
     finally:
         try:
             writers.flush_all()
