@@ -279,7 +279,7 @@ jobs:
 
   verify:
     needs: rollover
-    if: ${{ needs.rollover.result == 'success' }}
+    if: ${{ always() && needs.rollover.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
