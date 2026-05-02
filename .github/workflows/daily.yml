@@ -51,6 +51,10 @@ on:
         description: 'Verify sampling fraction'
         required: false
         default: '0.01'
+      force_earliest:
+        description: 'Reset broker offsets to low-water-mark before consume (used for one-shot 28-day backfill)'
+        type: boolean
+        default: false
 
 concurrency:
   group: zonestream-daily
@@ -64,7 +68,7 @@ jobs:
   consume:
     if: ${{ !inputs.skip_consume }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 130
     env:
       ZS_TOPICS: ${{ inputs.topics || vars.ZS_TOPICS || 'newly_registered_domain,newly_registered_fqdn,confirmed_newly_registered_domain' }}
       ZS_GROUP_ID: ${{ vars.ZS_GROUP_ID || format('gha-archive-{0}', github.repository_id) }}
@@ -84,6 +88,10 @@ jobs:
           cache-dependency-path: 'consumer/requirements.txt'
 
       - run: pip install -r consumer/requirements.txt
+
+      - name: Reset broker offsets to earliest (backfill)
+        if: ${{ inputs.force_earliest }}
+        run: python consumer/reset_offsets.py
 
       - name: Consume (kafka)
         if: ${{ inputs.transport != 'ws' }}
@@ -134,7 +142,7 @@ jobs:
     needs: consume
     if: ${{ always() && !inputs.skip_rollover && (needs.consume.result == 'success' || (needs.consume.result == 'skipped' && inputs.skip_consume)) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       TOPICS: ${{ inputs.topics || vars.ZS_TOPICS || 'newly_registered_domain,newly_registered_fqdn,confirmed_newly_registered_domain' }}
 
@@ -151,69 +159,72 @@ jobs:
 
       - run: pip install -r consumer/requirements.txt
 
-      - name: Resolve day
-        id: day
-        run: |
-          if [ -n "${{ inputs.day }}" ]; then
-            echo "day=${{ inputs.day }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "day=$(date -u -d 'yesterday' +%F)" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Pack each topic
+      - name: Pack all completed days
         id: pack
-        run: |
-          set -euo pipefail
-          DAY="${{ steps.day.outputs.day }}"
-          mkdir -p _release
-          : > _release/SHA256SUMS
-          packed=0
-          IFS=',' read -ra TOPIC_ARR <<< "$TOPICS"
-          for T in "${TOPIC_ARR[@]}"; do
-            T=$(echo "$T" | xargs)
-            [ -z "$T" ] && continue
-            out=$(python consumer/pack_day.py "$T" "$DAY") || true
-            if [ -z "$out" ]; then
-              echo "skip ${T}: no fragments for ${DAY}"
-              continue
-            fi
-            path=$(echo "$out" | cut -f1)
-            sha=$(echo "$out"  | cut -f3)
-            ext="${path#*.}"
-            asset="${T}-${DAY}.${ext}"
-            cp "$path" "_release/${asset}"
-            ( cd _release && echo "$sha  ${asset}" >> SHA256SUMS )
-            packed=$((packed+1))
-          done
-          echo "packed=$packed" >> "$GITHUB_OUTPUT"
-          ls -la _release/ || true
-
-      - name: Create / update Release
-        if: steps.pack.outputs.packed != '0'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          DAY="${{ steps.day.outputs.day }}"
-          TAG="snap-${DAY}"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" --clobber _release/*
+          set -euo pipefail
+          today=$(date -u +%F)
+          if [ -n "${{ inputs.day }}" ]; then
+            days="${{ inputs.day }}"
           else
-            gh release create "$TAG" \
-              --title "Zonestream snapshot ${DAY}" \
-              --notes-file _release/SHA256SUMS \
-              _release/*
+            # Find every <topic>/_partial/<YYYY-MM-DD>/ that isn't today.
+            days=$(
+              find data -mindepth 4 -maxdepth 4 -type d -path '*/_partial/*' \
+                -exec basename {} \; 2>/dev/null \
+              | sort -u | grep -v "^${today}\$" || true
+            )
           fi
+          if [ -z "$days" ]; then
+            echo "no completed days to rollover"
+            echo "packed=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "rolling over: $(echo "$days" | tr '\n' ' ')"
+          packed_total=0
+          for DAY in $days; do
+            DAY_DIR="_release/${DAY}"
+            mkdir -p "$DAY_DIR"
+            : > "${DAY_DIR}/SHA256SUMS"
+            packed_day=0
+            IFS=',' read -ra TOPIC_ARR <<< "$TOPICS"
+            for T in "${TOPIC_ARR[@]}"; do
+              T=$(echo "$T" | xargs)
+              [ -z "$T" ] && continue
+              out=$(python consumer/pack_day.py "$T" "$DAY") || true
+              if [ -z "$out" ]; then continue; fi
+              path=$(echo "$out" | cut -f1)
+              sha=$(echo "$out"  | cut -f3)
+              ext="${path#*.}"
+              asset="${T}-${DAY}.${ext}"
+              cp "$path" "${DAY_DIR}/${asset}"
+              ( cd "$DAY_DIR" && echo "$sha  ${asset}" >> SHA256SUMS )
+              packed_day=$((packed_day + 1))
+            done
+            if [ $packed_day -gt 0 ]; then
+              TAG="snap-${DAY}"
+              if gh release view "$TAG" >/dev/null 2>&1; then
+                gh release upload "$TAG" --clobber "${DAY_DIR}/"*
+              else
+                gh release create "$TAG" \
+                  --title "Zonestream snapshot ${DAY}" \
+                  --notes-file "${DAY_DIR}/SHA256SUMS" \
+                  "${DAY_DIR}/"*
+              fi
+              for T in "${TOPIC_ARR[@]}"; do
+                T=$(echo "$T" | xargs)
+                git rm -rf "data/${T}/_partial/${DAY}" 2>/dev/null || true
+              done
+              packed_total=$((packed_total + packed_day))
+            fi
+          done
+          echo "packed=$packed_total" >> "$GITHUB_OUTPUT"
 
-      - name: Prune _partial fragments and commit
+      - name: Commit rollover changes
         if: steps.pack.outputs.packed != '0'
         run: |
           set -e
-          DAY="${{ steps.day.outputs.day }}"
-          IFS=',' read -ra TOPIC_ARR <<< "$TOPICS"
-          for T in "${TOPIC_ARR[@]}"; do
-            T=$(echo "$T" | xargs)
-            git rm -rf "data/${T}/_partial/${DAY}" 2>/dev/null || true
-          done
           git add -A data/
           git config user.name  "zonestream-bot"
           git config user.email "zonestream-bot@users.noreply.github.com"
@@ -221,7 +232,7 @@ jobs:
             echo "nothing to commit"
             exit 0
           fi
-          git commit -m "rollover: ${DAY} → snap-${DAY}"
+          git commit -m "rollover: $(date -u +%FT%H:%MZ) batch (run ${GITHUB_RUN_ID})"
           for i in 1 2 3 4 5; do
             git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && \
               git push origin "HEAD:${GITHUB_REF_NAME}" && exit 0
