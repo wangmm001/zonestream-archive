@@ -27,12 +27,16 @@ KAFKA_FRAMING.md. We preserve wire bytes (Confluent magic + 4-byte schema id
 any future schema-aware decoder.
 
 Env:
-- ZS_RUN_SECONDS   wall-clock budget (default 5h45m)
-- ZS_TOPICS        comma-separated topic list
-- ZS_GROUP_ID      Kafka consumer group; broker is the offset authority
-- ZS_OFFSET_RESET  earliest|latest, applied only when the group has no offsets
-- ZS_FLUSH_SECONDS fsync + commit cadence (default 60)
-- ZS_BOOTSTRAP     override broker (default kafka.zonestream.openintel.nl:9092)
+- ZS_RUN_SECONDS    hard wall-clock budget (default 600s = 10 min)
+- ZS_IDLE_EXIT_SEC  exit early if no new message arrives for this many
+                    consecutive seconds; 0 disables (default 60). With the
+                    default the consumer drains its backlog and stops within
+                    ~60 s of the last received message.
+- ZS_TOPICS         comma-separated topic list
+- ZS_GROUP_ID       Kafka consumer group; broker is the offset authority
+- ZS_OFFSET_RESET   earliest|latest, applied only when the group has no offsets
+- ZS_FLUSH_SECONDS  fsync cadence (default 60)
+- ZS_BOOTSTRAP      override broker (default kafka.zonestream.openintel.nl:9092)
 """
 
 from __future__ import annotations
@@ -179,7 +183,8 @@ def snapshot_offsets(consumer: Consumer) -> None:
 
 
 def main() -> int:
-    run_seconds = int(os.environ.get("ZS_RUN_SECONDS", str(5 * 3600 + 45 * 60)))
+    run_seconds = int(os.environ.get("ZS_RUN_SECONDS", "600"))
+    idle_exit_seconds = int(os.environ.get("ZS_IDLE_EXIT_SEC", "60"))
     flush_seconds = int(os.environ.get("ZS_FLUSH_SECONDS", "60"))
     topics = [t.strip() for t in os.environ["ZS_TOPICS"].split(",") if t.strip()]
     if not topics:
@@ -191,16 +196,18 @@ def main() -> int:
         f"{t}={TOPIC_FORMAT.get(t, 'binary')}" for t in topics
     ))
 
-    deadline = time.monotonic() + run_seconds
+    start = time.monotonic()
+    deadline = start + run_seconds
 
     consumer = Consumer(consumer_config())
     consumer.subscribe(topics)
 
     writers = HourlyWriters()
-    stop = {"flag": False}
+    stop = {"flag": False, "reason": ""}
 
     def request_stop(*_):
         stop["flag"] = True
+        stop["reason"] = "signal"
 
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
@@ -209,15 +216,26 @@ def main() -> int:
     msgs_seen = 0
     msgs_flushed = 0
     last_flush = time.monotonic()
+    last_msg_at = time.monotonic()
+    grace_until = time.monotonic() + 30  # always poll for ≥30s before declaring idle
 
     try:
         while not stop["flag"] and time.monotonic() < deadline:
             msg = consumer.poll(1.0)
+            now = time.monotonic()
             if msg is None:
-                if time.monotonic() - last_flush >= flush_seconds:
+                if (
+                    idle_exit_seconds > 0
+                    and now > grace_until
+                    and (now - last_msg_at) >= idle_exit_seconds
+                ):
+                    stop["flag"] = True
+                    stop["reason"] = "idle"
+                    break
+                if now - last_flush >= flush_seconds:
                     writers.flush_all()
                     msgs_flushed = msgs_seen
-                    last_flush = time.monotonic()
+                    last_flush = now
                 continue
             if msg.error():
                 if msg.error().code() == KafkaError._PARTITION_EOF:
@@ -231,11 +249,12 @@ def main() -> int:
             writers.write(msg.topic(), ts_ms, msg.value())
             per_topic[msg.topic()] = per_topic.get(msg.topic(), 0) + 1
             msgs_seen += 1
+            last_msg_at = now
 
-            if time.monotonic() - last_flush >= flush_seconds:
+            if now - last_flush >= flush_seconds:
                 writers.flush_all()
                 msgs_flushed = msgs_seen
-                last_flush = time.monotonic()
+                last_flush = now
     finally:
         try:
             writers.flush_all()
@@ -245,7 +264,11 @@ def main() -> int:
             writers.close_all()
             consumer.close()
 
-    print(f"done: msgs_seen={msgs_seen} msgs_committed={msgs_flushed}")
+    elapsed = time.monotonic() - start
+    print(
+        f"done: msgs_seen={msgs_seen} msgs_committed={msgs_flushed} "
+        f"elapsed={elapsed:.1f}s reason={stop['reason'] or 'deadline'}"
+    )
     for t in topics:
         print(f"  {t}: {per_topic.get(t, 0)} msgs")
     return 0
