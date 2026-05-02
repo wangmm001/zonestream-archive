@@ -173,9 +173,9 @@ jobs:
           if [ -n "${{ inputs.day }}" ]; then
             days="${{ inputs.day }}"
           else
-            # Find every <topic>/_partial/<YYYY-MM-DD>/ that isn't today.
+            # data/<topic>/_partial/<YYYY-MM-DD>/ → that's depth 3 from data/.
             days=$(
-              find data -mindepth 4 -maxdepth 4 -type d -path '*/_partial/*' \
+              find data -mindepth 3 -maxdepth 3 -type d -path '*/_partial/*' \
                 -exec basename {} \; 2>/dev/null \
               | sort -u | grep -v "^${today}\$" || true
             )
