@@ -1,12 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.invalid/zonestream/newly_registered_domain.json",
-  "title": "newly_registered_domain (CT-derived)",
+  "title": "newly_registered_domain",
+  "description": "Newly observed domains. Each record originates from either a CT log entry (ct_name = log name, cert_index = log entry index, submission_timestamp present) OR an IXFR zone-file diff for an open ccTLD (ct_name = 'zone_data', cert_index = -1, no submission_timestamp).",
   "type": "object",
   "required": ["domain", "cert_index", "ct_name", "timestamp"],
   "properties": {
     "domain":               {"type": "string", "minLength": 1},
-    "cert_index":           {"type": "integer", "minimum": 0},
+    "cert_index":           {"type": "integer", "minimum": -1},
     "ct_name":              {"type": "string"},
     "timestamp":            {"type": "integer", "minimum": 0},
     "submission_timestamp": {"type": "number"}

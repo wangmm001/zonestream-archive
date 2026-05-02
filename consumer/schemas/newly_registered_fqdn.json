@@ -1,12 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.invalid/zonestream/newly_registered_fqdn.json",
-  "title": "newly_registered_fqdn (CT-derived)",
+  "title": "newly_registered_fqdn",
+  "description": "Like newly_registered_domain but at FQDN granularity (apex + sub-labels). cert_index = -1 / ct_name = 'zone_data' for IXFR-sourced records.",
   "type": "object",
   "required": ["fqdn", "cert_index", "ct_name", "timestamp"],
   "properties": {
     "fqdn":                 {"type": "string", "minLength": 1},
-    "cert_index":           {"type": "integer", "minimum": 0},
+    "cert_index":           {"type": "integer", "minimum": -1},
     "ct_name":              {"type": "string"},
     "timestamp":            {"type": "integer", "minimum": 0},
     "submission_timestamp": {"type": "number"}

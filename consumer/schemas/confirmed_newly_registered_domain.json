@@ -2,12 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.invalid/zonestream/confirmed_newly_registered_domain.json",
   "title": "confirmed_newly_registered_domain (DarkDNS-validated)",
-  "description": "Has a confidence score; observed fields domain, cert_index, ct_name, timestamp, confidence.",
+  "description": "DarkDNS-validated newly registered domains with a confidence score. As with newly_registered_domain, ccTLD-zone-derived rows use cert_index = -1 / ct_name = 'zone_data'.",
   "type": "object",
-  "required": ["domain", "timestamp"],
+  "required": ["domain", "cert_index", "ct_name", "timestamp", "confidence"],
   "properties": {
     "domain":     {"type": "string", "minLength": 1},
-    "cert_index": {"type": "integer", "minimum": 0},
+    "cert_index": {"type": "integer", "minimum": -1},
     "ct_name":    {"type": "string"},
     "timestamp":  {"type": "integer", "minimum": 0},
     "confidence": {"type": "number"}
