@@ -1,17 +1,17 @@
 {
   "_meta": {
-    "captured_at": 1777782580,
+    "captured_at": 1777868981,
     "group_id": "gha-archive-1226425261",
     "note": "Read positions reached by this run. Apply with finalize_offsets.py ONLY after data has been durably pushed to git.",
-    "run_id": "25269847515"
+    "run_id": "25301039810"
   },
   "confirmed_newly_registered_domain": {
-    "0": 48794314
+    "0": 48845438
   },
   "newly_registered_domain": {
-    "0": 102967668
+    "0": 103177645
   },
   "newly_registered_fqdn": {
-    "0": 137356683
+    "0": 137480982
   }
 }
