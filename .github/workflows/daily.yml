@@ -77,11 +77,11 @@ jobs:
       ZS_OFFSET_RESET: ${{ inputs.offset_reset || 'earliest' }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 1
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           cache: 'pip'
@@ -147,7 +147,7 @@ jobs:
       TOPICS: ${{ inputs.topics || vars.ZS_TOPICS || 'newly_registered_domain,newly_registered_fqdn,confirmed_newly_registered_domain' }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # Without ref:, checkout pins to github.sha (the commit that
           # triggered the workflow). The previous job pushed new commits to
@@ -155,7 +155,7 @@ jobs:
           ref: ${{ github.ref_name }}
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           cache: 'pip'
@@ -289,10 +289,10 @@ jobs:
       GH_TOKEN: ${{ github.token }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.ref_name }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           cache: 'pip'
