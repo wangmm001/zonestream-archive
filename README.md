@@ -57,9 +57,15 @@ reaper.yml hourly — opens an issue if no data commit lands for 36 h
 
 Live message rate of the three default topics combined is ~5 records/s
 (~450 K/day). A single 10-minute drain comfortably covers ~24 h of backlog
-even with every-day-fails-for-a-week recovery. Kafka retains ~28 days, so
-even multiple consecutive failed days lose nothing — the next successful
-run reads the missing window from the broker.
+even with multi-day failure recovery.
+
+Broker retention varies per topic (measured 2026-05-24, see
+[Topics](#topics)). The three lean defaults retain **~9.5 days**, so
+several consecutive failed days still recover losslessly. The high-volume
+topics (`certstream_domains`, `*_measurements`) retain only **~1 day**, and
+`certstream` only **~1 hour** — for those, anything missed between daily
+runs is gone for good and the daily sample is always from the most recent
+slice on the broker.
 
 Real cost: `current.jsonl.gz` lags by up to ~24 h after the latest record.
 That's the only thing the daily cadence trades away.
@@ -69,17 +75,20 @@ That's the only thing the daily cadence trades away.
 Eight topics live on the public broker (`kafka.zonestream.openintel.nl:9092`,
 anonymous). Only the three small JSON ones are archived by default — the
 other five together produce ~49 GiB/day, which does not fit on GitHub.
+Broker-side retention is per-topic and short on the high-volume ones, so the
+window in which you can backfill from scratch is bounded by the rightmost
+column (last probed 2026-05-24):
 
-| topic                                   | format         | upstream day vol | default |
-|-----------------------------------------|----------------|----------------:|---------|
-| `newly_registered_domain`               | JSON           | ~11 MB           | ✅       |
-| `newly_registered_fqdn`                 | JSON           | ~12 MB           | ✅       |
-| `confirmed_newly_registered_domain`     | JSON           | ~1 MB            | ✅       |
-| `certstream`                            | JSON           | ~15 GB           | —        |
-| `certstream_domains`                    | JSON           | ~8.6 GB          | —        |
-| `newly_issued_certificates_measurements`| `avro_extract` | ~9 GB            | —        |
-| `newly_registered_domains_measurements` | `avro_extract` | ~9.7 GB          | —        |
-| `newly_registered_fqdn_measurements`    | `avro_extract` | ~8.4 GB          | —        |
+| topic                                   | format         | upstream day vol | retention | default |
+|-----------------------------------------|----------------|----------------:|----------:|---------|
+| `newly_registered_domain`               | JSON           | ~11 MB           | ~9.5 d    | ✅       |
+| `newly_registered_fqdn`                 | JSON           | ~12 MB           | ~9.5 d    | ✅       |
+| `confirmed_newly_registered_domain`     | JSON           | ~1 MB            | ~9.5 d    | ✅       |
+| `certstream`                            | JSON           | ~15 GB           | ~1 h      | —        |
+| `certstream_domains`                    | JSON           | ~8.6 GB          | ~1.2 d    | —        |
+| `newly_issued_certificates_measurements`| `avro_extract` | ~9 GB            | ~1.0 d    | —        |
+| `newly_registered_domains_measurements` | `avro_extract` | ~9.7 GB          | ~1.0 d    | —        |
+| `newly_registered_fqdn_measurements`    | `avro_extract` | ~8.4 GB          | ~1.0 d    | —        |
 
 JSON topics land as `*.jsonl.zst` (one record per line). Topics with format
 `avro_extract` decode the upstream Confluent-wire Avro payload (schema id=1,
