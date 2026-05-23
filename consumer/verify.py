@@ -104,6 +104,13 @@ def iter_kfb_zst(asset: Path):
 def load_validator(topic: str) -> Draft202012Validator | None:
     path = SCHEMAS_DIR / f"{topic}.json"
     if not path.exists():
+        # The three `*_measurements` topics all carry the same extract shape
+        # (decoded from Avro schema id=1 by consumer/avro_extract.py), so
+        # they share one JSON Schema instead of three copies.
+        if topic.endswith("_measurements"):
+            shared = SCHEMAS_DIR / "_measurement_extract.json"
+            if shared.exists():
+                return Draft202012Validator(json.loads(shared.read_text()))
         return None
     return Draft202012Validator(json.loads(path.read_text()))
 

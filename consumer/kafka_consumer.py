@@ -21,10 +21,15 @@ re-reads the same window — at-least-once with possible duplicates that
 ``pack_day.py`` deduplicates at rollover time. Without this discipline a
 failed push silently loses data.
 
-Binary topics (Avro-on-the-wire) use length-prefixed framing — see
-KAFKA_FRAMING.md. We preserve wire bytes (Confluent magic + 4-byte schema id
-+ Avro payload) plus the broker timestamp so records can be replayed through
-any future schema-aware decoder.
+Topics with format "binary" (raw Avro-on-the-wire) use length-prefixed framing
+— see KAFKA_FRAMING.md. We preserve wire bytes (Confluent magic + 4-byte
+schema id + Avro payload) plus the broker timestamp so records can be replayed
+through any future schema-aware decoder.
+
+Topics with format "avro_extract" decode the Confluent-wire Avro payload
+with a bundled schema (consumer/schemas/avro_id_1.json) and write a compact
+JSON extract — see consumer/avro_extract.py. Used for the three DarkDNS
+`*_measurements` topics which all share schema id=1.
 
 Env:
 - ZS_RUN_SECONDS    hard wall-clock budget (default 600s = 10 min)
@@ -39,6 +44,10 @@ Env:
 - ZS_OFFSET_RESET   earliest|latest, applied only when the group has no offsets
 - ZS_FLUSH_SECONDS  fsync cadence (default 60)
 - ZS_BOOTSTRAP      override broker (default kafka.zonestream.openintel.nl:9092)
+- ZS_MAX_MSGS_PER_TOPIC  optional hard cap on extracted/forwarded messages
+                    per topic per run (default 0 = unlimited). Useful for the
+                    high-volume `*_measurements` topics so a daily run produces
+                    a bounded sample that fits in git/release.
 """
 
 from __future__ import annotations
@@ -52,7 +61,9 @@ import time
 from pathlib import Path
 
 import zstandard as zstd
-from confluent_kafka import Consumer, KafkaError
+from confluent_kafka import Consumer, KafkaError, TopicPartition
+
+import avro_extract
 
 BOOTSTRAP = os.environ.get(
     "ZS_BOOTSTRAP", "kafka.zonestream.openintel.nl:9092"
@@ -72,9 +83,14 @@ TOPIC_FORMAT: dict[str, str] = {
     "confirmed_newly_registered_domain": "json",
     "certstream": "json",
     "certstream_domains": "json",
-    "newly_issued_certificates_measurements": "binary",
-    "newly_registered_domains_measurements": "binary",
-    "newly_registered_fqdn_measurements": "binary",
+    # The three DarkDNS `*_measurements` topics: Confluent-wire Avro on the
+    # broker (schema id=1, `MeasurementResult` with 116-field `DnsRow`).
+    # We decode + extract a compact subset (~6% of raw avro after gzip) —
+    # see consumer/avro_extract.py for the extraction shape, and
+    # KAFKA_FRAMING.md for how to instead opt into lossless `.kfb.zst`.
+    "newly_issued_certificates_measurements": "avro_extract",
+    "newly_registered_domains_measurements": "avro_extract",
+    "newly_registered_fqdn_measurements": "avro_extract",
 }
 
 # .kfb.zst frame: u64-BE timestamp_ms || u32-BE payload_len || payload bytes
@@ -112,7 +128,9 @@ class HourlyWriters:
         day = "-".join(parts[:3])
         hh = parts[3]
         fmt = TOPIC_FORMAT.get(topic, "binary")
-        suffix = "jsonl.zst" if fmt == "json" else "kfb.zst"
+        # avro_extract produces JSON lines, so it shares the .jsonl.zst
+        # extension that pack_day.py already handles via pack_json().
+        suffix = "kfb.zst" if fmt == "binary" else "jsonl.zst"
         return DATA_ROOT / topic / "_partial" / day / f"{hh}-r{RUN_TAG}.{suffix}"
 
     def _open_writer(self, topic: str, hour: str):
@@ -124,7 +142,11 @@ class HourlyWriters:
         writer = cctx.stream_writer(raw, closefd=True)
         return raw, writer, fmt
 
-    def write(self, topic: str, ts_ms: int, payload: bytes) -> Path:
+    def write(self, topic: str, ts_ms: int, payload: bytes,
+              offset: int | None = None) -> Path | None:
+        """Write one message in its topic's format. Returns the destination
+        path on success, or None if the message was skipped (e.g. Avro extract
+        couldn't recognize the wire schema)."""
         hour = time.strftime("%Y/%m/%d/%H", time.gmtime(ts_ms / 1000.0))
         key = (topic, hour)
         if key not in self._open:
@@ -134,7 +156,14 @@ class HourlyWriters:
             writer.write(payload)
             if not payload.endswith(b"\n"):
                 writer.write(b"\n")
-        else:
+        elif fmt == "avro_extract":
+            line = avro_extract.to_line(payload, ts_ms=ts_ms, offset=offset)
+            if line is None:
+                # Unknown wire schema — skip rather than write a broken line.
+                # Caller bumps a counter.
+                return None
+            writer.write(line)
+        else:  # "binary" — raw .kfb.zst framing
             writer.write(_KFB_HDR.pack(ts_ms, len(payload)))
             writer.write(payload)
         return self._path(topic, hour)
@@ -209,6 +238,7 @@ def main() -> int:
     run_seconds = int(os.environ.get("ZS_RUN_SECONDS", "600"))
     hwm_grace = int(os.environ.get("ZS_HWM_GRACE_SEC", "5"))
     flush_seconds = int(os.environ.get("ZS_FLUSH_SECONDS", "60"))
+    max_per_topic = int(os.environ.get("ZS_MAX_MSGS_PER_TOPIC", "0"))
     hwm_check_seconds = 5
     topics = [t.strip() for t in os.environ["ZS_TOPICS"].split(",") if t.strip()]
     if not topics:
@@ -219,6 +249,8 @@ def main() -> int:
     print("formats: " + ", ".join(
         f"{t}={TOPIC_FORMAT.get(t, 'binary')}" for t in topics
     ))
+    if max_per_topic > 0:
+        print(f"per-topic cap: {max_per_topic} msgs")
 
     start = time.monotonic()
     deadline = start + run_seconds
@@ -237,6 +269,8 @@ def main() -> int:
     signal.signal(signal.SIGINT, request_stop)
 
     per_topic: dict[str, int] = {t: 0 for t in topics}
+    per_topic_skipped: dict[str, int] = {t: 0 for t in topics}
+    paused_topics: set[str] = set()
     msgs_seen = 0
     msgs_flushed = 0
     last_flush = time.monotonic()
@@ -258,17 +292,45 @@ def main() -> int:
                         continue
                     print(f"kafka error: {msg.error()}", file=sys.stderr)
                     continue
+                t = msg.topic()
                 ts_type, ts_ms = msg.timestamp()
                 if ts_ms <= 0:
                     ts_ms = int(time.time() * 1000)
-                writers.write(msg.topic(), ts_ms, msg.value())
-                per_topic[msg.topic()] = per_topic.get(msg.topic(), 0) + 1
-                msgs_seen += 1
+                dest = writers.write(t, ts_ms, msg.value(), offset=msg.offset())
+                if dest is None:
+                    # avro_extract returned None (unknown wire schema) — record
+                    # but don't count toward the per-topic cap, since no data
+                    # actually landed.
+                    per_topic_skipped[t] = per_topic_skipped.get(t, 0) + 1
+                else:
+                    per_topic[t] = per_topic.get(t, 0) + 1
+                    msgs_seen += 1
+                    # Per-topic cap: pause assigned partitions of this topic
+                    # so the consumer keeps draining other topics but stops
+                    # pulling more of this one this run. Offset will be
+                    # snapshotted at the position we paused — next run picks
+                    # up cleanly from there.
+                    if (max_per_topic > 0
+                            and per_topic[t] >= max_per_topic
+                            and t not in paused_topics):
+                        tps = [tp for tp in consumer.assignment() if tp.topic == t]
+                        if tps:
+                            consumer.pause(tps)
+                        paused_topics.add(t)
 
                 if now - last_flush >= flush_seconds:
                     writers.flush_all()
                     msgs_flushed = msgs_seen
                     last_flush = now
+
+            # If every subscribed topic has hit its cap, exit early — there
+            # is no useful work left this run.
+            if (max_per_topic > 0
+                    and paused_topics
+                    and paused_topics.issuperset(topics)):
+                stop["flag"] = True
+                stop["reason"] = "all-caps-hit"
+                break
 
             # HWM-based early exit: if our position has caught the broker
             # for at least `hwm_grace` seconds straight, stop polling.
@@ -298,7 +360,10 @@ def main() -> int:
         f"elapsed={elapsed:.1f}s reason={stop['reason'] or 'deadline'}"
     )
     for t in topics:
-        print(f"  {t}: {per_topic.get(t, 0)} msgs")
+        line = f"  {t}: {per_topic.get(t, 0)} msgs"
+        if per_topic_skipped.get(t):
+            line += f" ({per_topic_skipped[t]} skipped/unknown-schema)"
+        print(line)
     return 0
 
 

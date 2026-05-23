@@ -1,9 +1,24 @@
 # `.kfb.zst` framing
 
-Topics whose payloads are not self-delimited JSON (e.g. the OpenINTEL Zonestream
-`*_measurements` topics, which use Confluent-framed Avro: `0x00 || u32-BE
-schema_id || avro_payload`) are stored without decoding so that no information
-is lost. Each Kafka message becomes one frame:
+Topics whose payloads are not self-delimited JSON use Confluent-framed Avro
+on the wire: `0x00 || u32-BE schema_id || avro_payload`. The archive supports
+two on-disk dispositions for them — picked per topic via the `TOPIC_FORMAT`
+dict in `consumer/kafka_consumer.py`:
+
+- **`avro_extract`** (default for the three OpenINTEL `*_measurements` topics):
+  decode with the cached schema at `consumer/schemas/avro_id_1.json` and emit
+  a compact JSON line per record (`*.jsonl.zst`). High-value fields only —
+  see [`consumer/avro_extract.py`](consumer/avro_extract.py) and the
+  measurement-extract JSON Schema at
+  [`consumer/schemas/_measurement_extract.json`](consumer/schemas/_measurement_extract.json).
+- **`binary`**: store raw wire bytes losslessly using the framing below.
+  Pick this when you need to replay through a future / experimental decoder
+  with no information loss. Switch a topic to this mode by changing its
+  entry in `TOPIC_FORMAT`.
+
+## `.kfb.zst` frame layout
+
+Each Kafka message becomes one frame:
 
 ```
 +--------------------+--------------------+----------------+

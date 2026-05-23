@@ -21,9 +21,12 @@ data/
 ```
 
 `<topic>` is one of `newly_registered_domain`, `newly_registered_fqdn`,
-`confirmed_newly_registered_domain` (the three lean defaults). Each line is
-one JSON document straight from the Kafka broker — see
-[Topics](#topics) below for the per-topic schemas.
+`confirmed_newly_registered_domain` (the three lean defaults), or — opt-in —
+one of the three `*_measurements` topics, in which case each line is a
+**compact JSON extract** decoded from the upstream Avro (see
+[Avro measurement topics](#avro-measurement-topics) below). For the JSON
+defaults, each line is one document straight from the Kafka broker — see
+[Topics](#topics) for the per-topic schemas.
 
 ## Pipeline
 
@@ -67,28 +70,67 @@ Eight topics live on the public broker (`kafka.zonestream.openintel.nl:9092`,
 anonymous). Only the three small JSON ones are archived by default — the
 other five together produce ~49 GiB/day, which does not fit on GitHub.
 
-| topic                                   | format | day volume | default |
-|-----------------------------------------|--------|-----------:|---------|
-| `newly_registered_domain`               | JSON   | ~11 MB     | ✅       |
-| `newly_registered_fqdn`                 | JSON   | ~12 MB     | ✅       |
-| `confirmed_newly_registered_domain`     | JSON   | ~1 MB      | ✅       |
-| `certstream`                            | JSON   | ~15 GB     | —        |
-| `certstream_domains`                    | JSON   | ~8.6 GB    | —        |
-| `newly_issued_certificates_measurements`| Avro   | ~9 GB      | —        |
-| `newly_registered_domains_measurements` | Avro   | ~9.7 GB    | —        |
-| `newly_registered_fqdn_measurements`    | Avro   | ~8.4 GB    | —        |
+| topic                                   | format         | upstream day vol | default |
+|-----------------------------------------|----------------|----------------:|---------|
+| `newly_registered_domain`               | JSON           | ~11 MB           | ✅       |
+| `newly_registered_fqdn`                 | JSON           | ~12 MB           | ✅       |
+| `confirmed_newly_registered_domain`     | JSON           | ~1 MB            | ✅       |
+| `certstream`                            | JSON           | ~15 GB           | —        |
+| `certstream_domains`                    | JSON           | ~8.6 GB          | —        |
+| `newly_issued_certificates_measurements`| `avro_extract` | ~9 GB            | —        |
+| `newly_registered_domains_measurements` | `avro_extract` | ~9.7 GB          | —        |
+| `newly_registered_fqdn_measurements`    | `avro_extract` | ~8.4 GB          | —        |
 
-JSON topics land as `*.jsonl.zst` (one record per line). Avro-on-the-wire
-topics use Confluent framing (`0x00 || u32-BE schema_id || avro_payload`) and
-are stored as `*.kfb.zst` — see [KAFKA_FRAMING.md](KAFKA_FRAMING.md). Schemas
-under `consumer/schemas/` are JSON Schema for the JSON topics; Avro schemas
-are not yet published by OpenINTEL, so binary payloads are preserved verbatim
-for later replay.
+JSON topics land as `*.jsonl.zst` (one record per line). Topics with format
+`avro_extract` decode the upstream Confluent-wire Avro payload (schema id=1,
+record `MeasurementResult`) with a bundled schema at
+`consumer/schemas/avro_id_1.json` and write a compact JSON extract to
+`*.jsonl.zst` — see [Avro measurement topics](#avro-measurement-topics). If
+you instead want lossless raw frames (`*.kfb.zst`), set the topic's
+`TOPIC_FORMAT` entry in `consumer/kafka_consumer.py` to `"binary"` and read
+back with the snippet in [KAFKA_FRAMING.md](KAFKA_FRAMING.md).
 
-To temporarily enable a high-volume topic, dispatch `consume.yml` with the
-`topics` input. To make a long-term change, set `vars.ZS_TOPICS` in repo
-settings — but plan for object storage offload (S3/R2/B2) before doing so;
-this archive's git+release path tops out around ~50 MB/day.
+To temporarily enable an opt-in topic, dispatch `daily.yml` with the `topics`
+input. To make a long-term change, set `vars.ZS_TOPICS` in repo settings.
+For the three `*_measurements` topics, **also set `vars.ZS_MAX_MSGS_PER_TOPIC`**
+to bound the daily release size — see the budget table below.
+
+### Avro measurement topics
+
+The three `*_measurements` topics carry the per-query DNS results that
+DarkDNS's measurement workers (one host in Enschede with 16 workers, contrary
+to the IMC '24 paper) produce for newly-registered domains / FQDNs /
+CT-newly-issued certificates. All three share Avro schema id=1
+(`nl.openintel.dnspadawan.types.response.MeasurementResult` with a 116-field
+nested `DnsRow`). Live throughput is ~3000 msg/s peak on the largest topic.
+
+A daily `consume` run cannot drain the full ~27 GB/day uncompressed. We
+instead pull a **bounded sample** per topic (cap with
+`ZS_MAX_MSGS_PER_TOPIC`) and decode each message into a compact extract
+keeping:
+
+- subject identity (`id`, `campaign`, `node`, `request_ts`, `tags`)
+- per-RR answers (`rows[]`): query name + type, `ip4`/`ip6`/`ns_name`/
+  `mx_name`/`target`/`ptr`/`soa`/`txt`/`spf`, `ttl`, `as`/`country`/`prefix`,
+  `rtt`, `section_level`, `authoritative_level`
+- header flag union (`ad`/`aa`/`tc`)
+- DNSSEC presence counts (`rrsig`/`dnskey`/`ds`/`nsec`/`nsec3` — the full
+  key/signature wire bytes are dropped; counts are enough for deployment
+  inventories)
+- CAA + TLSA records (kept in full when present)
+
+Size budget (measured on 10k real records from `newly_registered_domains_measurements`):
+
+| messages | raw Avro | extract JSON (uncompressed) | gzipped (level 9) | zstd (level 10) |
+|---------:|---------:|----------------------------:|------------------:|----------------:|
+|  10 000  | 21.6 MB  | 17.6 MB                     | 1.3 MB            | 0.71 MB         |
+|  50 000  | ~108 MB  | ~88 MB                      | ~6.5 MB           | ~3.6 MB         |
+| 100 000  | ~216 MB  | ~176 MB                     | ~13 MB            | ~7 MB           |
+
+Recommended starting point: `ZS_MAX_MSGS_PER_TOPIC=50000` → ~20 MB/day of
+gzipped releases across the three measurement topics combined. Raise as your
+release storage permits. The full JSON Schema for one extract record is at
+[`consumer/schemas/_measurement_extract.json`](consumer/schemas/_measurement_extract.json).
 
 ## Setup
 

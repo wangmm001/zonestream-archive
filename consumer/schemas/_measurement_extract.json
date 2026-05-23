@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/zonestream/_measurement_extract.json",
+  "title": "measurement extract",
+  "description": "Compact JSON extract of one nl.openintel.dnspadawan.types.response.MeasurementResult Avro record (Confluent wire schema id=1). Shared by the three DarkDNS *_measurements topics. See consumer/avro_extract.py for the producer and KAFKA_FRAMING.md for the on-the-wire format.",
+  "type": "object",
+  "required": ["id", "state", "rows", "flags", "dnssec", "tags"],
+  "properties": {
+    "ts_ms":      {"type": "integer", "minimum": 0, "description": "Kafka broker timestamp (ms since epoch)"},
+    "offset":     {"type": "integer", "minimum": 0, "description": "Kafka partition offset of the source message"},
+    "id":         {"type": "string", "minLength": 1, "description": "Domain or FQDN under measurement (trailing dot)"},
+    "campaign":   {"type": ["string", "null"], "description": "newly_registered_domains | newly_registered_fqdn | certificate-reactive"},
+    "node":       {"type": ["string", "null"], "description": "OpenINTEL measurement node (e.g. enschede-01)"},
+    "request_ts": {"type": ["integer", "null"], "description": "DnsPadawan request_timestamp (epoch seconds)"},
+    "state":      {"type": "string", "enum": ["OK", "ERROR"]},
+    "tags":       {"type": "object", "additionalProperties": {"type": "string"}, "description": "Per-measurement metadata (cert_index, ctlog_name, request_type, scheduled_time, …)"},
+    "flags": {
+      "type": "object",
+      "required": ["ad", "aa", "tc"],
+      "properties": {
+        "ad": {"type": "boolean", "description": "AD bit set on at least one row (DNSSEC-validated)"},
+        "aa": {"type": "boolean", "description": "AA bit set on at least one row"},
+        "tc": {"type": "boolean", "description": "TC bit set on at least one row"}
+      },
+      "additionalProperties": false
+    },
+    "dnssec": {
+      "type": "object",
+      "required": ["rrsig", "dnskey", "ds", "nsec", "nsec3"],
+      "properties": {
+        "rrsig":  {"type": "integer", "minimum": 0},
+        "dnskey": {"type": "integer", "minimum": 0},
+        "ds":     {"type": "integer", "minimum": 0},
+        "nsec":   {"type": "integer", "minimum": 0},
+        "nsec3":  {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "rows": {
+      "type": "array",
+      "description": "One entry per DnsRow in the measurement's resultList. Empty if state=ERROR.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "sec":      {"type": ["string", "null"], "description": "section_level: ANSWERS | AUTHORITY RECORDS | ADDITIONAL RECORDS"},
+          "auth":     {"type": ["string", "null"], "description": "authoritative_level: CHILD | CHILDREN | PARENT | TLD | RESOLVER | NAMESERVER"},
+          "q":        {"type": ["string", "null"], "description": "query_name"},
+          "qt":       {"type": ["string", "null"], "description": "query_type"},
+          "t":        {"type": ["string", "null"], "description": "response_type"},
+          "ttl":      {"type": ["integer", "null"]},
+          "ip4":      {"type": "string", "description": "A-record address"},
+          "ip6":      {"type": "string", "description": "AAAA-record address"},
+          "ns_name":  {"type": "string"},
+          "mx_name":  {"type": "string"},
+          "mx_pref":  {"type": "integer"},
+          "target":   {"type": "string", "description": "CNAME / DNAME target"},
+          "ptr":      {"type": "string"},
+          "soa":      {"type": "object"},
+          "txt":      {"type": "string"},
+          "spf":      {"type": "string"},
+          "as":       {"type": "string", "description": "Origin ASN (string form, may be path-set)"},
+          "country":  {"type": "string", "description": "ISO 3166-1 alpha-2"},
+          "prefix":   {"type": "string", "description": "Most-specific announced prefix containing the IP"},
+          "rtt":      {"type": "number"},
+          "err":      {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "caa": {
+      "type": "array",
+      "description": "Present only when the measurement found CAA records.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "flags": {"type": ["integer", "null"]},
+          "tag":   {"type": "string"},
+          "value": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "tlsa": {
+      "type": "array",
+      "description": "Present only when the measurement found TLSA records.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "q":         {"type": "string"},
+          "usage":     {"type": ["integer", "null"]},
+          "selector":  {"type": ["integer", "null"]},
+          "matchtype": {"type": ["integer", "null"]},
+          "certdata":  {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "err": {"type": "string", "description": "Top-level error_message when state=ERROR"}
+  },
+  "additionalProperties": false
+}

@@ -55,6 +55,10 @@ on:
         description: 'Reset broker offsets to low-water-mark before consume (used for one-shot 28-day backfill)'
         type: boolean
         default: false
+      max_msgs_per_topic:
+        description: 'Per-topic cap on extracted/forwarded messages per run (0 = unlimited). Recommended ~50000 when the *_measurements topics are enabled — see README.'
+        required: false
+        default: ''
 
 concurrency:
   group: zonestream-daily
@@ -75,6 +79,7 @@ jobs:
       ZS_RUN_SECONDS: ${{ inputs.run_seconds || '600' }}
       ZS_HWM_GRACE_SEC: ${{ inputs.hwm_grace_seconds || '5' }}
       ZS_OFFSET_RESET: ${{ inputs.offset_reset || 'earliest' }}
+      ZS_MAX_MSGS_PER_TOPIC: ${{ inputs.max_msgs_per_topic || vars.ZS_MAX_MSGS_PER_TOPIC || '0' }}
 
     steps:
       - uses: actions/checkout@v5
