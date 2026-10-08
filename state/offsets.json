@@ -1,32 +1,32 @@
 {
   "_meta": {
-    "captured_at": 1791354474,
+    "captured_at": 1791441118,
     "group_id": "gha-archive-1226425261",
     "note": "Read positions reached by this run. Apply with finalize_offsets.py ONLY after data has been durably pushed to git.",
-    "run_id": "37580838895"
+    "run_id": "37737958382"
   },
   "confirmed_newly_registered_domain": {
-    "0": 73834151
+    "0": 73884151
   },
   "newly_issued_certificates_measurements": {
-    "0": 81486931165
+    "0": 81693493011
   },
   "newly_registered_domain": {
-    "0": 156540710
+    "0": 156590710
   },
   "newly_registered_domains_measurements": {
-    "0": 108278965253,
-    "1": 6806797135,
-    "2": 6806671822,
-    "3": 6806691048
+    "0": 108382792250,
+    "1": 6910636053,
+    "2": 6910530687,
+    "3": 6910537168
   },
   "newly_registered_fqdn": {
-    "0": 170418603
+    "0": 170468603
   },
   "newly_registered_fqdn_measurements": {
-    "0": 85642561409,
-    "1": 3039246226,
-    "2": 3039293805,
-    "3": 3039085445
+    "0": 85696808363,
+    "1": 3093504730,
+    "2": 3093539895,
+    "3": 3093328927
   }
 }
